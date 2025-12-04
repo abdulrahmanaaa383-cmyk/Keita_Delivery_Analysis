@@ -77,27 +77,27 @@ def clean_and_process_data(df):
 def generate_pivot_table(df):
     """ينشئ الجدول المحوري (Pivot Table) بتجميع مؤشرات الأداء المطلوبة."""
     
-    # تجميع البيانات حسب المندوب (ID, الاسم الأول, الاسم الأخير)
-    pivot_df = df.groupby(['Courier ID', 'First Name', 'Last Name']).agg(
+    # 🚨 **تصحيح الخطأ** 🚨: العودة إلى طريقة التجميع القياسية في Pandas.
+    pivot_df = df.groupby(['Courier ID', 'Courier First Name', 'Courier Last Name']).agg({
         # تجميع أوقات العمل
-        'Courier App Online Time': ('Courier App Online Time', 'sum'),
-        'Valid Online Time': ('Valid Online Time', 'sum'),
+        'Courier App Online Time': 'sum',
+        'Valid Online Time': 'sum',
         
         # تجميع المهام
-        'Accepted Tasks': ('Accepted Tasks', 'sum'),
-        'Delivered Tasks': ('Delivered Tasks', 'sum'),
-        'Cancelled Tasks': ('Cancelled Tasks', 'sum'),
-        'Rejected Tasks': ('Rejected Tasks', 'sum'),
+        'Accepted Tasks': 'sum',
+        'Delivered Tasks': 'sum',
+        'Cancelled Tasks': 'sum',
+        'Rejected Tasks': 'sum',
         
         # حساب المتوسطات للمؤشرات (Rate & Time)
-        'On-time Rate (D)': ('On-time Rate (D)', 'mean'),
-        'Avg Delivery Time of Delivered Orders': ('Avg Delivery Time of Delivered Orders', 'mean'),
-        'Cancellation Rate from Delivery Issues': ('Cancellation Rate from Delivery Issues', 'mean'),
+        'On-time Rate (D)': 'mean',
+        'Avg Delivery Time of Delivered Orders': 'mean',
+        'Cancellation Rate from Delivery Issues': 'mean',
 
-    ).reset_index()
+    }).reset_index()
 
     # إنشاء عمود الاسم الكامل
-    pivot_df['Agent Name'] = pivot_df['First Name'] + ' ' + pivot_df['Last Name']
+    pivot_df['Agent Name'] = pivot_df['Courier First Name'] + ' ' + pivot_df['Courier Last Name']
     
     # 🌟 إضافة مؤشر TPH (الإنتاجية) كأهم مؤشر جديد
     pivot_df['TPH (Tasks Per Valid Hour)'] = np.where(
@@ -117,8 +117,8 @@ def generate_pivot_table(df):
         'Cancellation Rate from Delivery Issues'
     ]
     
-    # إزالة الأعمدة 'First Name' و 'Last Name'
-    pivot_df = pivot_df.drop(columns=['First Name', 'Last Name'], errors='ignore')
+    # إزالة الأعمدة التي استخدمت لإنشاء 'Agent Name'
+    pivot_df = pivot_df.drop(columns=['Courier First Name', 'Courier Last Name'], errors='ignore')
     
     # التأكد من وجود جميع الأعمدة النهائية قبل الترتيب
     pivot_df = pivot_df[[col for col in final_cols if col in pivot_df.columns]]
@@ -301,7 +301,7 @@ def to_excel(df):
 st.set_page_config(layout="wide", page_title="أداة تحليل أداء مناديب كيتا")
 st.title("🛵 محلل أداء مناديب التوصيل المتقدم (كيتا)")
 st.markdown("---")
-st.markdown("✅ **تم التحديث:** تم استخدام أسماء الأعمدة الأصلية في تقرير الأداء وتم التركيز على مؤشر **TPH** كأهم مؤشر جديد.")
+st.markdown("✅ **تم التصحيح:** تم إصلاح خطأ `SyntaxError` واستخدام أسماء الأعمدة الأصلية. نأمل أن يعمل الآن بنجاح.")
 
 # تحديد عتبة الحساسية في الواجهة للسماح للمستخدم بتغييرها (ميزة إضافية)
 st.sidebar.header("إعدادات التحليل")
