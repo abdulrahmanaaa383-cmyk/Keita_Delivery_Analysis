@@ -15,38 +15,37 @@ def clean_and_process_data(df):
     # تنظيف أسماء الأعمدة من المسافات الزائدة
     df.columns = df.columns.str.strip()
     
-    # تحديد الأعمدة الأساسية المطلوبة لتحليل مناديب كيتا
-    required_cols = {
+    # 🌟 التحديد الدقيق لخرائط الأسماء من ملف المستخدم إلى الأسماء الداخلية للكود 🌟
+    # المفتاح: هو الاسم المتوقع في ملف المستخدم (بناءً على التقارير السابقة)
+    # القيمة: هي الاسم القياسي الذي يستخدمه الكود داخلياً (يجب أن يتطابق مع ما في generate_pivot_table)
+    COLUMN_MAPPING = {
         'Courier ID': 'ID',
         'Courier First Name': 'First Name',
         'Courier Last Name': 'Last Name',
-        'Valid Online Time': 'Online Time (h)',
+        'Valid Online Time': 'Online Time (h)',  # الاسم الداخلي
         'Delivered Tasks': 'Delivered Tasks',
-        'Cancelled Tasks': 'Cancelled Tasks', # 🌟 تم الإضافة: الطلبات الملغاة
-        'Rejected Tasks': 'Rejected Tasks',   # 🌟 تم الإضافة: الطلبات المرفوضة
+        'Cancelled Tasks': 'Cancelled Tasks',
+        'Rejected Tasks': 'Rejected Tasks',
         'On-time Rate (D)': 'On-time Rate',
         'Avg Delivery Time of Delivered Orders': 'Avg Delivery Time (min)',
-        'Cancellation Rate from Delivery Issues': 'Cancellation Rate'
+        'Cancellation Rate from Delivery Issues': 'Cancellation Rate' # الاسم الداخلي
     }
     
-    # إعادة تسمية الأعمدة الموجودة في الملف إلى الأسماء القياسية
-    current_cols = {c: required_cols[c] for c in required_cols if c in df.columns}
-    # التأكد من وجود الأعمدة الأساسية الثلاثة على الأقل قبل المتابعة
-    # هنا نفترض أن الأعمدة التي قدمتها هي الأسماء التي ستأتي في الملفات
-    df = df.rename(columns=current_cols, errors='ignore')
+    # إعادة تسمية الأعمدة الموجودة في الملف إلى الأسماء القياسية التي يستخدمها الكود
+    df = df.rename(columns=COLUMN_MAPPING, errors='ignore')
 
-    # التأكد من تحويل الأعمدة الرقمية إلى النوع float
+    # التأكد من تحويل الأعمدة الرقمية إلى النوع float باستخدام الأسماء الداخلية الجديدة
     for col in [
         'Online Time (h)', 'Delivered Tasks', 'On-time Rate', 
         'Avg Delivery Time (min)', 'Cancellation Rate',
-        'Cancelled Tasks', 'Rejected Tasks' # 🌟 تم الإضافة هنا
+        'Cancelled Tasks', 'Rejected Tasks'
     ]:
         if col in df.columns:
             # معالجة القيم التي قد تكون نسب مئوية أو سلاسل نصية
             df[col] = df[col].astype(str).str.replace('[^0-9.+-]', '', regex=True)
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
     
-    # تصفية الصفوف التي لا تحتوي على ID للمندوب أو ساعات عمل
+    # تصفية الصفوف التي لا تحتوي على ID للمندوب أو ساعات عمل فعالة
     df = df.dropna(subset=['ID'])
     if 'Online Time (h)' in df.columns:
          df = df[df['Online Time (h)'] > 0].reset_index(drop=True)
@@ -56,12 +55,14 @@ def clean_and_process_data(df):
 def generate_pivot_table(df):
     """ينشئ الجدول المحوري (Pivot Table) بتجميع مؤشرات الأداء."""
     
+    # 🔴 ملاحظة: الآن نستخدم الأسماء الداخلية القياسية المضمونة بعد دالة clean_and_process_data
+    
     # تجميع البيانات حسب المندوب
     pivot_df = df.groupby(['ID', 'First Name', 'Last Name']).agg(
         Total_Delivered_Tasks=('Delivered Tasks', 'sum'),
         Total_Online_Hours=('Online Time (h)', 'sum'),
-        Total_Cancelled_Tasks=('Cancelled Tasks', 'sum'), # 🌟 تجميع الملغاة
-        Total_Rejected_Tasks=('Rejected Tasks', 'sum'),   # 🌟 تجميع المرفوضة
+        Total_Cancelled_Tasks=('Cancelled Tasks', 'sum'),
+        Total_Rejected_Tasks=('Rejected Tasks', 'sum'),
         Avg_On_time_Rate=('On-time Rate', 'mean'),
         Avg_Delivery_Time=('Avg Delivery Time (min)', 'mean'),
         Avg_Cancellation_Rate=('Cancellation Rate', 'mean')
@@ -71,7 +72,12 @@ def generate_pivot_table(df):
     pivot_df['Agent Name'] = pivot_df['First Name'] + ' ' + pivot_df['Last Name']
 
     # حساب مؤشر الإنتاجية الأساسي: عدد الطلبات في الساعة (Tasks Per Hour)
-    pivot_df['Tasks Per Hour'] = (pivot_df['Total_Delivered_Tasks'] / pivot_df['Total_Online_Hours']).fillna(0).round(2)
+    # التأكد من عدم القسمة على صفر
+    pivot_df['Tasks Per Hour'] = np.where(
+        pivot_df['Total_Online_Hours'] > 0,
+        (pivot_df['Total_Delivered_Tasks'] / pivot_df['Total_Online_Hours']),
+        0
+    ).round(2)
     
     # تنسيق النسب المئوية 
     pivot_df['Avg_On_time_Rate (%)'] = (pivot_df['Avg_On_time_Rate'] * 100).round(2).astype(str) + '%'
@@ -80,7 +86,7 @@ def generate_pivot_table(df):
     # إعادة ترتيب الأعمدة للعرض النهائي (مع إضافة الملغاة والمرفوضة)
     pivot_df = pivot_df[['ID', 'Agent Name', 
                          'Total_Delivered_Tasks', 'Total_Online_Hours', 'Tasks Per Hour',
-                         'Total_Cancelled_Tasks', 'Total_Rejected_Tasks', # 🌟 تمت الإضافة للعرض
+                         'Total_Cancelled_Tasks', 'Total_Rejected_Tasks',
                          'Avg_On_time_Rate (%)', 'Avg_Delivery_Time', 'Avg_Cancellation_Rate (%)']]
     
     # إعادة تسمية الأعمدة للعرض باللغة العربية
@@ -95,10 +101,9 @@ def generate_pivot_table(df):
         'Avg_Cancellation_Rate (%)': 'متوسط معدل الإلغاء'
     }
     
-    # تطبيق الأسماء العربية الجديدة على الأعمدة التي تم تجميعها
     display_df = pivot_df.rename(columns=display_cols).drop(columns=['First Name', 'Last Name'], errors='ignore')
     
-    return pivot_df, display_df
+    return pivot_df, display_pivot
 
 def analyze_performance(pivot_df):
     """تطبيق منطق العمل لإنشاء توصيات بناءً على المقارنة بالمتوسط."""
@@ -115,8 +120,8 @@ def analyze_performance(pivot_df):
     avg_delivery_time = analysis_df['Avg_Delivery_Time'].mean()
     avg_cancellation_rate = analysis_df['Cancellation_Rate_Num'].mean()
     avg_tph = analysis_df['Tasks Per Hour'].mean()
-    avg_cancelled_count = analysis_df['Total_Cancelled_Tasks'].mean() # 🌟 متوسط الملغاة
-    avg_rejected_count = analysis_df['Total_Rejected_Tasks'].mean()   # 🌟 متوسط المرفوضة
+    avg_cancelled_count = analysis_df['Total_Cancelled_Tasks'].mean()
+    avg_rejected_count = analysis_df['Total_Rejected_Tasks'].mean()
     
     # تعريف الحدود الدنيا/القصوى
     LOW_PERFORMANCE_THRESHOLD = 0.8 
@@ -138,11 +143,11 @@ def analyze_performance(pivot_df):
         if row['Cancellation_Rate_Num'] > (avg_cancellation_rate * HIGH_PERFORMANCE_THRESHOLD) and row['Cancellation_Rate_Num'] * 100 > 2:
             notes.append(f"❌ معدل إلغاء مرتفع (نسبة): {row['Avg_Cancellation_Rate (%)']} — يتطلب مراجعة أسباب الإلغاء.")
         
-        # 4. تحليل إجمالي الطلبات الملغاة (العدد) 🌟 جديد
+        # 4. تحليل إجمالي الطلبات الملغاة (العدد)
         if row['Total_Cancelled_Tasks'] > (avg_cancelled_count * HIGH_PERFORMANCE_THRESHOLD) and row['Total_Cancelled_Tasks'] >= 5:
              notes.append(f"🔥 إجمالي إلغاءات عالي: {int(row['Total_Cancelled_Tasks'])} طلب. يجب مراجعة سلوك قبول الطلبات أو مشكلات الموقع/التواصل.")
 
-        # 5. تحليل إجمالي الطلبات المرفوضة (العدد) 🌟 جديد
+        # 5. تحليل إجمالي الطلبات المرفوضة (العدد)
         if row['Total_Rejected_Tasks'] > (avg_rejected_count * HIGH_PERFORMANCE_THRESHOLD) and row['Total_Rejected_Tasks'] >= 10:
              notes.append(f"🛑 إجمالي رفضات عالي: {int(row['Total_Rejected_Tasks'])} طلب. قد يشير إلى التردد في قبول الطلبات أو التقييم السلبي للمناطق البعيدة.")
         
@@ -197,9 +202,11 @@ uploaded_file = st.file_uploader("📥 يرجى رفع ملف الإكسيل/CSV
 
 if uploaded_file is not None:
     try:
+        # قراءة الملف (مع افتراض أن الملف قد يحتوي على CSV أو Excel)
         df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
         st.success(f"تم تحميل الملف: {uploaded_file.name} — السجلات: {len(df)}")
         
+        # 1. تنظيف وإعادة تسمية الأعمدة
         df = clean_and_process_data(df)
         
         if df.empty:
@@ -210,6 +217,7 @@ if uploaded_file is not None:
         st.dataframe(df.head(), use_container_width=True, hide_index=True)
         st.markdown("---")
 
+        # 2. إنشاء الجدول المحوري
         pivot_df, display_pivot = generate_pivot_table(df)
         
         st.header("📈 تقرير الأداء المجمع")
@@ -245,7 +253,9 @@ if uploaded_file is not None:
             st.success("🎉 **لا توجد مشاكل واضحة!** الأداء العام ضمن الحدود المقبولة.")
 
     except Exception as e:
+        # عرض رسالة خطأ أكثر فائدة في حال وجود أي خطأ آخر
         st.error(f"❌ حدث خطأ أثناء قراءة الملف أو معالجة البيانات. الرجاء التأكد من أسماء الأعمدة وصيغة البيانات الرقمية.")
+        # هنا نعرض الخطأ الفني في الواجهة لمساعدتنا في التصحيح
         st.exception(e)
 else:
     st.info("قم برفع الملف للبدء في تحليل الأداء.")
