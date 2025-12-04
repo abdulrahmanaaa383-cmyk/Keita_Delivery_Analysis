@@ -55,8 +55,6 @@ def clean_and_process_data(df):
 def generate_pivot_table(df):
     """ينشئ الجدول المحوري (Pivot Table) بتجميع مؤشرات الأداء."""
     
-    # 🔴 ملاحظة: الآن نستخدم الأسماء الداخلية القياسية المضمونة بعد دالة clean_and_process_data
-    
     # تجميع البيانات حسب المندوب
     pivot_df = df.groupby(['ID', 'First Name', 'Last Name']).agg(
         Total_Delivered_Tasks=('Delivered Tasks', 'sum'),
@@ -101,9 +99,11 @@ def generate_pivot_table(df):
         'Avg_Cancellation_Rate (%)': 'متوسط معدل الإلغاء'
     }
     
+    # المتغير الذي يحمل الجدول المنسق للعرض في Streamlit
     display_df = pivot_df.rename(columns=display_cols).drop(columns=['First Name', 'Last Name'], errors='ignore')
     
-    return pivot_df, display_pivot
+    # 🌟 التصحيح هنا: نستخدم display_df بدلاً من display_pivot 🌟
+    return pivot_df, display_df
 
 def analyze_performance(pivot_df):
     """تطبيق منطق العمل لإنشاء توصيات بناءً على المقارنة بالمتوسط."""
@@ -218,6 +218,7 @@ if uploaded_file is not None:
         st.markdown("---")
 
         # 2. إنشاء الجدول المحوري
+        # 🌟 تم تصحيح الخطأ هنا (display_pivot بدلاً من display_df)
         pivot_df, display_pivot = generate_pivot_table(df)
         
         st.header("📈 تقرير الأداء المجمع")
