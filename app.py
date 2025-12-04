@@ -12,17 +12,24 @@ import numpy as np
 # 0.90 تعني أن الأداء سيئ إذا كان أقل من 90% من المتوسط (أي أقل بـ 10%)
 PERFORMANCE_THRESHOLD = 0.90 
 
-# قائمة الأعمدة القياسية التي يتم استخدامها في التحليل
-# يجب أن تتطابق المفاتيح (اليسار) مع أسماء الأعمدة في ملف الإكسيل الخام
-STANDARD_COLS = {
-    'Courier ID': 'ID',
+# قائمة الأعمدة الأصلية المطلوبة للتحليل في التقرير النهائي
+# ملاحظة: سنستخدم هذه الأسماء في التقرير بدلاً من الأسماء المعربة
+REQUIRED_COLS_MAPPING = {
+    # الأعمدة التعريفية التي يجب أن تكون موجودة كما هي
+    'Courier ID': 'Courier ID',
     'Courier First Name': 'First Name',
     'Courier Last Name': 'Last Name',
-    'Valid Online Time': 'Online Time (h)',
+    
+    # مؤشرات الأداء المطلوبة للتحليل
+    'Courier App Online Time': 'Courier App Online Time', # وقت الاتصال بالتطبيق
+    'Valid Online Time': 'Valid Online Time', # ساعات العمل الفعالة
+    'Accepted Tasks': 'Accepted Tasks',
     'Delivered Tasks': 'Delivered Tasks',
-    'On-time Rate (D)': 'On-time Rate', # معدل الالتزام
-    'Avg Delivery Time of Delivered Orders': 'Avg Delivery Time (min)', # متوسط وقت التسليم
-    'Cancellation Rate from Delivery Issues': 'Cancellation Rate' # معدل الإلغاء
+    'Cancelled Tasks': 'Cancelled Tasks',
+    'Rejected Tasks': 'Rejected Tasks',
+    'On-time Rate (D)': 'On-time Rate (D)', # معدل الالتزام
+    'Avg Delivery Time of Delivered Orders': 'Avg Delivery Time of Delivered Orders', # متوسط وقت التسليم
+    'Cancellation Rate from Delivery Issues': 'Cancellation Rate from Delivery Issues' # معدل الإلغاء
 }
 
 # ==============================================================================
@@ -32,75 +39,88 @@ STANDARD_COLS = {
 def clean_and_process_data(df):
     """
     تنظيف وتوحيد أسماء الأعمدة وتحويل البيانات للتحليل.
-    تتم تسمية الأعمدة بناءً على مفاتيح القاموس STANDARD_COLS
     """
     
-    # 🔴 التعديل هنا: تنظيف أسماء الأعمدة من المسافات الزائدة فقط. (تم إزالة regex لتجنب حذف رموز مثل (D))
+    # تنظيف أسماء الأعمدة من المسافات الزائدة فقط للحفاظ على الرموز مثل (D)
     df.columns = df.columns.str.strip()
     
-    # إعادة تسمية الأعمدة الموجودة في الملف إلى الأسماء القياسية للتحليل
-    current_cols = {old: new for old, new in STANDARD_COLS.items() if old in df.columns}
-        
-    df = df.rename(columns=current_cols, errors='ignore')
+    # التأكد من وجود الأعمدة الأساسية المطلوبة
+    missing_cols = [col for col in REQUIRED_COLS_MAPPING.keys() if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"الملف لا يحتوي على الأعمدة الأساسية التالية: {', '.join(missing_cols)}. يرجى التحقق من رؤوس الأعمدة.")
 
-    # التأكد من وجود الأعمدة الأساسية اللازمة للتحليل (باستخدام الأسماء الجديدة بعد إعادة التسمية)
-    if 'ID' not in df.columns or 'Online Time (h)' not in df.columns or 'On-time Rate' not in df.columns:
-        # إرسال قائمة الأعمدة المتوقعة للمساعدة في تصحيح الملف
-        expected_raw_cols = ', '.join([f"'{col}'" for col in ['Courier ID', 'Valid Online Time', 'On-time Rate (D)']])
-        raise ValueError(f"الملف لا يحتوي على الأعمدة الأساسية المطلوبة: {expected_raw_cols} (أو ما يقابلها). يرجى التحقق من رؤوس الأعمدة.")
+    # اختيار الأعمدة المطلوبة فقط (مع التأكد من وجودها مسبقاً)
+    df = df[list(REQUIRED_COLS_MAPPING.keys())]
 
-    # التأكد من تحويل الأعمدة الرقمية إلى النوع float
-    for col in ['Online Time (h)', 'Delivered Tasks', 'On-time Rate', 'Avg Delivery Time (min)', 'Cancellation Rate']:
+    # قائمة الأعمدة التي يجب تحويلها إلى أرقام (باستثناء ID والاسم)
+    numeric_cols = [
+        'Courier App Online Time', 'Valid Online Time', 'Accepted Tasks', 
+        'Delivered Tasks', 'Cancelled Tasks', 'Rejected Tasks', 
+        'On-time Rate (D)', 'Avg Delivery Time of Delivered Orders', 
+        'Cancellation Rate from Delivery Issues'
+    ]
+
+    for col in numeric_cols:
         if col in df.columns:
             # تحويل القيم التي قد تكون في شكل سلاسل نصية (مثل 30.5h) إلى أرقام
             df[col] = df[col].astype(str).str.replace('[^0-9.+-]', '', regex=True)
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-    # تصفية الصفوف التي لا تحتوي على ID للمندوب أو لا يوجد بها ساعات عمل (المطلب الجديد)
-    df = df.dropna(subset=['ID'])
-    # 🔴 الميزة المضافة: فلترة المناديب الذين لم يعملوا (ساعات الأونلاين 0)
-    df = df[df['Online Time (h)'] > 0].reset_index(drop=True)
+    # تصفية الصفوف التي لا تحتوي على ID للمندوب
+    df = df.dropna(subset=['Courier ID'])
+    
+    # 🔴 فلترة المناديب الذين لم يعملوا (ساعات الأونلاين الفعالة 0) - نعتمد على Valid Online Time
+    df = df[df['Valid Online Time'] > 0].reset_index(drop=True)
     
     return df
 
 def generate_pivot_table(df):
-    """ينشئ الجدول المحوري (Pivot Table) بتجميع مؤشرات الأداء."""
+    """ينشئ الجدول المحوري (Pivot Table) بتجميع مؤشرات الأداء المطلوبة."""
     
-    # تجميع البيانات حسب المندوب
-    pivot_df = df.groupby(['ID', 'First Name', 'Last Name']).agg(
-        Total_Delivered_Tasks=('Delivered Tasks', 'sum'),
-        Total_Online_Hours=('Online Time (h)', 'sum'),
-        Avg_On_time_Rate=('On-time Rate', 'mean'),
-        Avg_Delivery_Time=('Avg Delivery Time (min)', 'mean'),
-        Avg_Cancellation_Rate=('Cancellation Rate', 'mean')
+    # تجميع البيانات حسب المندوب (ID, الاسم الأول, الاسم الأخير)
+    pivot_df = df.groupby(['Courier ID', 'First Name', 'Last Name']).agg(
+        # تجميع أوقات العمل
+        'Courier App Online Time': ('Courier App Online Time', 'sum'),
+        'Valid Online Time': ('Valid Online Time', 'sum'),
+        
+        # تجميع المهام
+        'Accepted Tasks': ('Accepted Tasks', 'sum'),
+        'Delivered Tasks': ('Delivered Tasks', 'sum'),
+        'Cancelled Tasks': ('Cancelled Tasks', 'sum'),
+        'Rejected Tasks': ('Rejected Tasks', 'sum'),
+        
+        # حساب المتوسطات للمؤشرات (Rate & Time)
+        'On-time Rate (D)': ('On-time Rate (D)', 'mean'),
+        'Avg Delivery Time of Delivered Orders': ('Avg Delivery Time of Delivered Orders', 'mean'),
+        'Cancellation Rate from Delivery Issues': ('Cancellation Rate from Delivery Issues', 'mean'),
+
     ).reset_index()
 
     # إنشاء عمود الاسم الكامل
     pivot_df['Agent Name'] = pivot_df['First Name'] + ' ' + pivot_df['Last Name']
     
-    # حساب الإنتاجية (Tasks Per Hour)
-    pivot_df['Tasks Per Hour'] = np.where(
-        pivot_df['Total_Online_Hours'] > 0,
-        (pivot_df['Total_Delivered_Tasks'] / pivot_df['Total_Online_Hours']),
+    # 🌟 إضافة مؤشر TPH (الإنتاجية) كأهم مؤشر جديد
+    pivot_df['TPH (Tasks Per Valid Hour)'] = np.where(
+        pivot_df['Valid Online Time'] > 0,
+        (pivot_df['Delivered Tasks'] / pivot_df['Valid Online Time']),
         0
     ).round(2)
-
-    # إعادة تسمية الأعمدة لتكون باللغة العربية
-    pivot_df = pivot_df.rename(columns={
-        'ID': 'هوية المندوب (ID)',
-        'Agent Name': 'اسم المندوب',
-        'Total_Delivered_Tasks': 'الطلبات المنجزة',
-        'Total_Online_Hours': 'إجمالي الساعات أونلاين',
-        'Tasks Per Hour': 'الإنتاجية (TPH)',
-        'Avg_On_time_Rate': 'معدل الالتزام (نسبة)', # نتركها كنسبة داخلية (0-1) للتنسيق والتلوين
-        'Avg_Delivery_Time': 'متوسط وقت التسليم (دقيقة)',
-        'Avg_Cancellation_Rate': 'معدل الإلغاء (نسبة)' # نتركها كنسبة داخلية (0-1) للتنسيق والتلوين
-    })
     
-    # ترتيب الأعمدة للعرض النهائي
-    final_cols = ['هوية المندوب (ID)', 'اسم المندوب', 'الطلبات المنجزة', 'إجمالي الساعات أونلاين', 'الإنتاجية (TPH)',
-                  'معدل الالتزام (نسبة)', 'متوسط وقت التسليم (دقيقة)', 'معدل الإلغاء (نسبة)']
+    # ترتيب الأعمدة للعرض النهائي (مع الاحتفاظ بالأسماء الإنجليزية الأصلية)
+    final_cols = [
+        'Courier ID', 'Agent Name', 
+        'Valid Online Time', 'Courier App Online Time',
+        'TPH (Tasks Per Valid Hour)',
+        'Delivered Tasks', 'Accepted Tasks', 'Cancelled Tasks', 'Rejected Tasks',
+        'On-time Rate (D)', 
+        'Avg Delivery Time of Delivered Orders', 
+        'Cancellation Rate from Delivery Issues'
+    ]
     
+    # إزالة الأعمدة 'First Name' و 'Last Name'
+    pivot_df = pivot_df.drop(columns=['First Name', 'Last Name'], errors='ignore')
+    
+    # التأكد من وجود جميع الأعمدة النهائية قبل الترتيب
     pivot_df = pivot_df[[col for col in final_cols if col in pivot_df.columns]]
     
     return pivot_df
@@ -110,68 +130,57 @@ def style_performance_table(df):
     تطبيق التنسيق الشرطي (Conditional Highlighting) على جدول الأداء.
     الأخضر = أداء جيد، الأحمر = أداء سيئ.
     """
-    # نسخ الجدول لتحويل النسب إلى أرقام (0-100) للتنسيق
+    
     style_df = df.copy()
     
-    # تحويل النسب الداخلية (0-1) إلى نسب مئوية (0-100) للعرض
-    style_df['معدل الالتزام (نسبة)'] = style_df['معدل الالتزام (نسبة)'] * 100
-    style_df['معدل الإلغاء (نسبة)'] = style_df['معدل الإلغاء (نسبة)'] * 100
+    # 1. تحديد الأعمدة الرقمية الرئيسية للتنسيق
+    ontime_col = 'On-time Rate (D)'
+    cancellation_col = 'Cancellation Rate from Delivery Issues'
+    delivery_time_col = 'Avg Delivery Time of Delivered Orders'
+    tph_col = 'TPH (Tasks Per Valid Hour)'
     
-    # حساب المتوسطات للمقارنة
-    avg_ontime = style_df['معدل الالتزام (نسبة)'].mean()
-    avg_delivery_time = style_df['متوسط وقت التسليم (دقيقة)'].mean()
-    avg_cancellation = style_df['معدل الإلغاء (نسبة)'].mean()
-    avg_tph = style_df['الإنتاجية (TPH)'].mean()
+    # 2. تحويل النسب (0-1) إلى نسب مئوية (0-100) للحساب والعرض
+    style_df[ontime_col] = style_df[ontime_col] * 100
+    style_df[cancellation_col] = style_df[cancellation_col] * 100
     
-    # حساسية التلوين بناءً على الثابت PERFORMANCE_THRESHOLD
+    # 3. حساب المتوسطات للمقارنة
+    avg_ontime = style_df[ontime_col].mean()
+    avg_delivery_time = style_df[delivery_time_col].mean()
+    avg_cancellation = style_df[cancellation_col].mean()
+    avg_tph = style_df[tph_col].mean()
+    
+    # 4. حساسية التلوين بناءً على الثابت PERFORMANCE_THRESHOLD
     LOW_THRESHOLD = PERFORMANCE_THRESHOLD 
     HIGH_THRESHOLD = 1 / PERFORMANCE_THRESHOLD 
     
     def highlight_performance(s):
         """تطبيق التلوين على الأعمدة بناءً على المتوسط."""
         
-        # مؤشرات أفضل بالزيادة (On-time Rate, TPH)
-        is_worst_positive = s[['معدل الالتزام (نسبة)', 'الإنتاجية (TPH)']] < [avg_ontime * LOW_THRESHOLD, avg_tph * LOW_THRESHOLD]
-        
-        # مؤشرات أفضل بالنقصان (Delivery Time, Cancellation Rate)
-        is_worst_negative = s[['متوسط وقت التسليم (دقيقة)', 'معدل الإلغاء (نسبة)']] > [avg_delivery_time * HIGH_THRESHOLD, avg_cancellation * HIGH_THRESHOLD]
-
         styles = [''] * len(s) 
         
-        # تحديد موقع الأعمدة
-        try:
-            ontime_idx = style_df.columns.get_loc('معدل الالتزام (نسبة)')
-            tph_idx = style_df.columns.get_loc('الإنتاجية (TPH)')
-            delivery_time_idx = style_df.columns.get_loc('متوسط وقت التسليم (دقيقة)')
-            cancellation_idx = style_df.columns.get_loc('معدل الإلغاء (نسبة)')
-            
-            # 1. معدل الالتزام (%)
-            if is_worst_positive[0]:
-                 styles[ontime_idx] = 'background-color: #f8d7da; color: #721c24' # أحمر للسيئ
-            else:
-                 styles[ontime_idx] = 'background-color: #d4edda; color: #155724' # أخضر للجيد
+        # مؤشرات يجب أن تزيد (كلما زادت كان أفضل)
+        positive_kpis = {ontime_col: avg_ontime, tph_col: avg_tph}
+        # مؤشرات يجب أن تنقص (كلما نقصت كان أفضل)
+        negative_kpis = {delivery_time_col: avg_delivery_time, cancellation_col: avg_cancellation}
 
-            # 2. الإنتاجية (TPH)
-            if is_worst_positive[1]:
-                 styles[tph_idx] = 'background-color: #f8d7da; color: #721c24'
-            else:
-                 styles[tph_idx] = 'background-color: #d4edda; color: #155724'
+        for col, avg_val in positive_kpis.items():
+            if col in style_df.columns:
+                col_idx = style_df.columns.get_loc(col)
+                if s[col] < (avg_val * LOW_THRESHOLD):
+                     styles[col_idx] = 'background-color: #f8d7da; color: #721c24' # أحمر للسيئ
+                else:
+                     styles[col_idx] = 'background-color: #d4edda; color: #155724' # أخضر للجيد
 
-            # 3. وقت التسليم (دقيقة)
-            if is_worst_negative[0]:
-                 styles[delivery_time_idx] = 'background-color: #f8d7da; color: #721c24'
-            else:
-                 styles[delivery_time_idx] = 'background-color: #d4edda; color: #155724'
+        for col, avg_val in negative_kpis.items():
+            if col in style_df.columns:
+                col_idx = style_df.columns.get_loc(col)
+                # شرط إضافي لمعدل الإلغاء: لا يعتبر سيئاً ما لم يكن هناك إلغاء فعلي (أعلى من 2%)
+                is_cancellation_issue = col == cancellation_col and s[col] > 2
                 
-            # 4. معدل الإلغاء (%)
-            # نضع حد إضافي لكي لا يظهر تلوين أحمر لمندوب لديه معدل إلغاء 0.01%
-            if is_worst_negative[1] and s['معدل الإلغاء (نسبة)'] * 100 > 2: # معدل إلغاء فعلي فوق 2%
-                 styles[cancellation_idx] = 'background-color: #f8d7da; color: #721c24'
-            else:
-                 styles[cancellation_idx] = 'background-color: #d4edda; color: #155724'
-                 
-        except KeyError:
-            pass
+                if s[col] > (avg_val * HIGH_THRESHOLD) or is_cancellation_issue:
+                     styles[col_idx] = 'background-color: #f8d7da; color: #721c24' # أحمر للسيئ
+                else:
+                     styles[col_idx] = 'background-color: #d4edda; color: #155724' # أخضر للجيد
 
         return styles
 
@@ -181,14 +190,19 @@ def style_performance_table(df):
         highlight_performance,
         axis=1, # تطبيق التلوين صف بصف
     ).format({
-        # تنسيق العمود كنسبة مئوية للعرض (من 0 إلى 100)
-        'معدل الالتزام (نسبة)': '{:.2f}%',
-        'معدل الإلغاء (نسبة)': '{:.2f}%',
-        # تنسيق العمود كرقم عادي (دقيقة / TPH / ساعات)
-        'متوسط وقت التسليم (دقيقة)': '{:.2f}',
-        'الإنتاجية (TPH)': '{:.2f}',
-        'الطلبات المنجزة': '{:,.0f}',
-        'إجمالي الساعات أونلاين': '{:.2f}',
+        # تنسيق النسب المئوية
+        ontime_col: '{:.2f}%',
+        cancellation_col: '{:.2f}%',
+        # تنسيق الأرقام العشرية الأخرى
+        delivery_time_col: '{:.2f}',
+        tph_col: '{:.2f}',
+        'Valid Online Time': '{:.2f}',
+        'Courier App Online Time': '{:.2f}',
+        # تنسيق الأرقام الصحيحة
+        'Delivered Tasks': '{:,.0f}',
+        'Accepted Tasks': '{:,.0f}',
+        'Cancelled Tasks': '{:,.0f}',
+        'Rejected Tasks': '{:,.0f}',
     })
     
     return styled_df
@@ -197,19 +211,17 @@ def style_performance_table(df):
 def analyze_performance(pivot_df):
     """
     تطبيق منطق العمل لإنشاء توصيات بناءً على المقارنة بالمتوسط.
-    يستخدم قيم النسبة (0-1) من الجدول المحوري الأصلي للحساب.
     """
     recommendations = {}
 
     analysis_df = pivot_df.copy()
     
     # أسماء الأعمدة المستخدمة في التحليل
-    ontime_col = 'معدل الالتزام (نسبة)'
-    cancellation_col = 'معدل الإلغاء (نسبة)'
-    delivery_time_col = 'متوسط وقت التسليم (دقيقة)'
-    tph_col = 'الإنتاجية (TPH)'
-    delivered_tasks_col = 'الطلبات المنجزة'
-    online_hours_col = 'إجمالي الساعات أونلاين'
+    ontime_col = 'On-time Rate (D)'
+    cancellation_col = 'Cancellation Rate from Delivery Issues'
+    delivery_time_col = 'Avg Delivery Time of Delivered Orders'
+    tph_col = 'TPH (Tasks Per Valid Hour)'
+    valid_online_col = 'Valid Online Time'
 
     # حساب المتوسطات للمقارنة
     avg_ontime = analysis_df[ontime_col].mean()
@@ -222,29 +234,31 @@ def analyze_performance(pivot_df):
     HIGH_PERFORMANCE_THRESHOLD = 1 / PERFORMANCE_THRESHOLD 
 
     for index, row in analysis_df.iterrows():
-        agent_name = row['اسم المندوب']
+        agent_name = row['Agent Name']
         notes = []
 
-        # 1. تحليل كفاءة التسليم والالتزام بالوقت
+        # 1. تحليل الإنتاجية (Tasks Per Valid Hour)
+        if row[tph_col] < (avg_tph * LOW_PERFORMANCE_THRESHOLD) and row[valid_online_col] > 5: # نراجع فقط من عمل أكثر من 5 ساعات
+            notes.append(f"**📉 إنتاجية منخفضة (TPH):** يحقق {row[tph_col]:.2f} طلب/ساعة (أقل من متوسط الفريق). **التوصية:** توجيهه للعمل في أوقات الذروة ومراجعة منطق قبول الطلبات لتقليل فترة الانتظار.")
+            
+        # 2. تحليل كفاءة التسليم والالتزام بالوقت
+        # نستخدم النسبة المئوية في النص للتوضيح (يجب ضربها في 100)
         if row[ontime_col] < (avg_ontime * LOW_PERFORMANCE_THRESHOLD):
-            notes.append(f"**🔴 انخفاض الالتزام بالوقت:** معدله {row[ontime_col]*100:.2f}% (أقل من متوسط الفريق). **التوصية:** تدريب على إدارة المسارات والبدء في الحركة بمجرد تأكيد الطلب.")
+            notes.append(f"**🔴 انخفاض الالتزام بالوقت:** معدله {row[ontime_col]*100:.2f}% (أقل من متوسط الفريق). **التوصية:** تدريب على إدارة المسارات والبدء في الحركة بمجرد تأكيد الطلب لتجنب التأخير.")
         
-        # 2. تحليل سرعة التسليم
+        # 3. تحليل سرعة التسليم
         if row[delivery_time_col] > (avg_delivery_time * HIGH_PERFORMANCE_THRESHOLD):
-            notes.append(f"**🟡 ارتفاع متوسط وقت التسليم:** متوسطه {row[delivery_time_col]:.2f} دقيقة (أبطأ من المتوسط). **التوصية:** مراجعة سلوكه أثناء الاستلام والتسليم لتحديد نقاط الضعف.")
+            notes.append(f"**🟡 ارتفاع متوسط وقت التسليم:** متوسطه {row[delivery_time_col]:.2f} دقيقة (أبطأ من المتوسط). **التوصية:** التركيز على سرعة استلام الطلبات وتقليل وقت الانتظار في المطعم.")
 
-        # 3. تحليل معدل الإلغاء
+        # 4. تحليل معدل الإلغاء
         # إذا كان أعلى من المتوسط بـ 10% وأعلى من 2% (لتجنب التنبيه على قيم قليلة جداً)
         if row[cancellation_col] > (avg_cancellation * HIGH_PERFORMANCE_THRESHOLD) and row[cancellation_col] * 100 > 2:
-            notes.append(f"**❌ معدل إلغاء مرتفع:** معدله {row[cancellation_col]*100:.2f}%. **التوصية:** التحقيق في سبب الإلغاءات المتكررة (أخطاء في الاستلام أو مشاكل في التواصل).")
+            notes.append(f"**❌ معدل إلغاء مرتفع:** معدله {row[cancellation_col]*100:.2f}%. **التوصية:** التحقيق الفوري في سبب الإلغاءات المتكررة (مشاكل تحديد الموقع/التواصل مع العميل/أخطاء النظام).")
 
-        # 4. تحليل الإنتاجية (Tasks Per Hour)
-        if row[tph_col] < (avg_tph * LOW_PERFORMANCE_THRESHOLD) and row[online_hours_col] > 5: # نراجع فقط من عمل أكثر من 5 ساعات
-            notes.append(f"**📉 إنتاجية منخفضة (TPH):** يحقق {row[tph_col]:.2f} طلب/ساعة. **التوصية:** توجيهه للعمل في أوقات الذروة أو مراجعة منطق قبول الطلبات لديه.")
 
         # تجميع الملاحظات
         if notes:
-            recommendations[agent_name] = {'ID': row['هوية المندوب (ID)'], 'Notes': notes}
+            recommendations[agent_name] = {'ID': row['Courier ID'], 'Notes': notes}
 
     return recommendations
 
@@ -252,18 +266,29 @@ def to_excel(df):
     """دالة تحويل DataFrame إلى ملف Excel في الذاكرة لتمكين التصدير."""
     output = BytesIO()
     
-    # تحويل النسب الداخلية (0-1) إلى نسب مئوية (0-100) مع الرمز % للتصدير
     export_df = df.copy()
-    # إزالة الأعمدة بنسب (0-1) وإنشاء أعمدة جديدة بـ %
-    export_df['معدل الالتزام (%)'] = (export_df.pop('معدل الالتزام (نسبة)') * 100).round(2)
-    export_df['معدل الإلغاء (%)'] = (export_df.pop('معدل الإلغاء (نسبة)') * 100).round(2)
     
-    # ترتيب الأعمدة لتضمين التنسيق الجديد
-    final_cols = ['هوية المندوب (ID)', 'اسم المندوب', 'الطلبات المنجزة', 'إجمالي الساعات أونلاين', 'الإنتاجية (TPH)',
-                  'معدل الالتزام (%)', 'متوسط وقت التسليم (دقيقة)', 'معدل الإلغاء (%)']
+    # الأعمدة التي يجب تحويلها إلى نسبة مئوية بـ %
+    percent_cols = ['On-time Rate (D)', 'Cancellation Rate from Delivery Issues']
+    
+    for col in percent_cols:
+        export_df[col + ' (%)'] = (export_df.pop(col) * 100).round(2)
+    
+    # ترتيب الأعمدة للتصدير
+    final_cols = [
+        'Courier ID', 'Agent Name', 
+        'Valid Online Time', 'Courier App Online Time',
+        'TPH (Tasks Per Valid Hour)',
+        'Delivered Tasks', 'Accepted Tasks', 'Cancelled Tasks', 'Rejected Tasks',
+        'On-time Rate (D) (%)', 
+        'Avg Delivery Time of Delivered Orders', 
+        'Cancellation Rate from Delivery Issues (%)'
+    ]
     
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        export_df[final_cols].to_excel(writer, index=False, sheet_name='Keeta_Delivery_Report_Summary')
+        # التأكد من تصدير الأعمدة الموجودة فقط بالترتيب المطلوب
+        cols_to_export = [col for col in final_cols if col in export_df.columns]
+        export_df[cols_to_export].to_excel(writer, index=False, sheet_name='Keeta_Delivery_Report_Summary')
             
     processed_data = output.getvalue()
     return processed_data
@@ -276,7 +301,7 @@ def to_excel(df):
 st.set_page_config(layout="wide", page_title="أداة تحليل أداء مناديب كيتا")
 st.title("🛵 محلل أداء مناديب التوصيل المتقدم (كيتا)")
 st.markdown("---")
-st.markdown("✅ **تم التحديث:** تم تجاهل المناديب الذين لم يسجلوا أي ساعة عمل (`Online Time = 0`) وتم إضافة تنسيق شرطي قوي.")
+st.markdown("✅ **تم التحديث:** تم استخدام أسماء الأعمدة الأصلية في تقرير الأداء وتم التركيز على مؤشر **TPH** كأهم مؤشر جديد.")
 
 # تحديد عتبة الحساسية في الواجهة للسماح للمستخدم بتغييرها (ميزة إضافية)
 st.sidebar.header("إعدادات التحليل")
@@ -308,7 +333,7 @@ if uploaded_file is not None:
         df = clean_and_process_data(df)
         
         filtered_count = initial_count - len(df)
-        st.success(f"تم تحميل الملف **{uploaded_file.name}** بنجاح. تم استبعاد **{filtered_count}** سجل (لعدم وجود ساعات عمل).")
+        st.success(f"تم تحميل الملف **{uploaded_file.name}** بنجاح. تم استبعاد **{filtered_count}** سجل (لعدم وجود ساعات عمل فعالة).")
         
         # عرض البيانات الأولية
         st.subheader("📋 نموذج البيانات بعد المعالجة (أول 5 من السجلات الفعالة)")
@@ -370,7 +395,7 @@ if uploaded_file is not None:
 
     except ValueError as ve:
         st.error(f"❌ خطأ في هيكل الملف: {ve}")
-        st.markdown("يرجى التأكد من أن الملف يحتوي على أعمدة الهوية والساعات أونلاين ومعدل الالتزام بالوقت بالأسماء الصحيحة والمطابقة لاسم العمود الأصلي في ملف الإكسيل (مثل 'On-time Rate (D)').")
+        st.markdown("يرجى التأكد من أن الملف يحتوي على جميع الأعمدة المطلوبة بالأسماء الصحيحة والمطابقة لملف الإكسيل الأصلي.")
     except Exception as e:
         st.error(f"❌ حدث خطأ غير متوقع أثناء المعالجة: {e}")
         st.markdown("**نصيحة:** قد يكون هناك مشكلة في تنسيق البيانات داخل الملف أو في الأعمدة المحفوظة.")
