@@ -41,6 +41,10 @@ FLEXIBLE_SEARCH_KEYS = {
     'apponline': 'Courier App Online Time',
     'first name': 'Courier First Name',
     'last name': 'Courier Last Name',
+    
+    # 🌟 تحسينات لدعم أسماء الأعمدة التي قدمتها (Cancelled Tasks, Rejected Tasks)
+    'cancelled': 'Cancelled Tasks',
+    'rejected': 'Rejected Tasks',
 }
 
 
