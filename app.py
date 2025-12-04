@@ -13,6 +13,7 @@ import numpy as np
 PERFORMANCE_THRESHOLD = 0.90 
 
 # قائمة الأعمدة القياسية التي يتم استخدامها في التحليل
+# يجب أن تتطابق المفاتيح (اليسار) مع أسماء الأعمدة في ملف الإكسيل الخام
 STANDARD_COLS = {
     'Courier ID': 'ID',
     'Courier First Name': 'First Name',
@@ -43,7 +44,9 @@ def clean_and_process_data(df):
 
     # التأكد من وجود الأعمدة الأساسية اللازمة للتحليل
     if 'ID' not in df.columns or 'Online Time (h)' not in df.columns:
-        raise ValueError("الملف لا يحتوي على الأعمدة الأساسية المطلوبة: 'Courier ID' و 'Valid Online Time'.")
+        # إرسال قائمة الأعمدة المتوقعة للمساعدة في تصحيح الملف
+        expected_cols = ', '.join([f"'{col}'" for col in ['Courier ID', 'Valid Online Time'] if col in STANDARD_COLS])
+        raise ValueError(f"الملف لا يحتوي على الأعمدة الأساسية المطلوبة: {expected_cols} (أو ما يقابلها).")
 
     # التأكد من تحويل الأعمدة الرقمية إلى النوع float
     for col in ['Online Time (h)', 'Delivered Tasks', 'On-time Rate', 'Avg Delivery Time (min)', 'Cancellation Rate']:
@@ -161,7 +164,7 @@ def style_performance_table(df):
                 
             # 4. معدل الإلغاء (%)
             # نضع حد إضافي لكي لا يظهر تلوين أحمر لمندوب لديه معدل إلغاء 0.01%
-            if is_worst_negative[1] and s['معدل الإلغاء (نسبة)'] > 2: # معدل إلغاء فعلي فوق 2%
+            if is_worst_negative[1] and s['معدل الإلغاء (نسبة)'] * 100 > 2: # معدل إلغاء فعلي فوق 2%
                  styles[cancellation_idx] = 'background-color: #f8d7da; color: #721c24'
             else:
                  styles[cancellation_idx] = 'background-color: #d4edda; color: #155724'
@@ -177,8 +180,10 @@ def style_performance_table(df):
         highlight_performance,
         axis=1, # تطبيق التلوين صف بصف
     ).format({
+        # تنسيق العمود كنسبة مئوية للعرض (من 0 إلى 100)
         'معدل الالتزام (نسبة)': '{:.2f}%',
         'معدل الإلغاء (نسبة)': '{:.2f}%',
+        # تنسيق العمود كرقم عادي (دقيقة / TPH / ساعات)
         'متوسط وقت التسليم (دقيقة)': '{:.2f}',
         'الإنتاجية (TPH)': '{:.2f}',
         'الطلبات المنجزة': '{:,.0f}',
@@ -248,10 +253,11 @@ def to_excel(df):
     
     # تحويل النسب الداخلية (0-1) إلى نسب مئوية (0-100) مع الرمز % للتصدير
     export_df = df.copy()
-    export_df['معدل الالتزام (%)'] = (export_df.pop('معدل الالتزام (نسبة)') * 100).round(2).astype(str) + '%'
-    export_df['معدل الإلغاء (%)'] = (export_df.pop('معدل الإلغاء (نسبة)') * 100).round(2).astype(str) + '%'
+    # إزالة الأعمدة بنسب (0-1) وإنشاء أعمدة جديدة بـ %
+    export_df['معدل الالتزام (%)'] = (export_df.pop('معدل الالتزام (نسبة)') * 100).round(2)
+    export_df['معدل الإلغاء (%)'] = (export_df.pop('معدل الإلغاء (نسبة)') * 100).round(2)
     
-    # إعادة ترتيب الأعمدة لتضمين التنسيق الجديد
+    # ترتيب الأعمدة لتضمين التنسيق الجديد
     final_cols = ['هوية المندوب (ID)', 'اسم المندوب', 'الطلبات المنجزة', 'إجمالي الساعات أونلاين', 'الإنتاجية (TPH)',
                   'معدل الالتزام (%)', 'متوسط وقت التسليم (دقيقة)', 'معدل الإلغاء (%)']
     
@@ -290,8 +296,10 @@ if uploaded_file is not None:
     try:
         # قراءة البيانات مع تحديد نوع الملف
         if uploaded_file.name.endswith('.csv'):
+             # قراءة ملف CSV
              df = pd.read_csv(uploaded_file)
         else:
+             # قراءة ملف Excel
              df = pd.read_excel(uploaded_file)
         
         # 1. تنظيف ومعالجة البيانات
