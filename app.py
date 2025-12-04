@@ -108,6 +108,13 @@ def analyze_performance(pivot_df):
 
     analysis_df = pivot_df.copy()
     
+    # 🌟 الإضافة الجديدة: تصفية المناديب الذين ليس لديهم ساعات عمل فعلية (ساعات = صفر) 🌟
+    initial_count = len(analysis_df)
+    analysis_df = analysis_df[analysis_df['Total_Online_Hours'] > 0].reset_index(drop=True)
+    
+    if len(analysis_df) < initial_count:
+        st.info(f"ℹ️ {initial_count - len(analysis_df)} agents were excluded from the analysis because their Total Online Hours were zero.")
+
     # تحويل النسب المئوية إلى أرقام للتحليل
     analysis_df['On_time_Rate_Num'] = analysis_df['Avg_On_time_Rate (%)'].str.replace('%', '').astype(float) / 100
     analysis_df['Cancellation_Rate_Num'] = analysis_df['Avg_Cancellation_Rate (%)'].str.replace('%', '').astype(float) / 100
@@ -219,10 +226,41 @@ if uploaded_file is not None:
         # 2. إنشاء الجدول المحوري
         pivot_df, display_pivot = generate_pivot_table(df)
         
+        # 🌟 تصفية التقرير المجمع هنا أيضاً ليعكس نفس المنطق 🌟
+        # نستخدم نسخة الـ display_pivot لأنها هي التي يتم عرضها مباشرة
+        initial_pivot_count = len(display_pivot)
+        
+        # بما أن display_pivot هي الجدول المعاد تسمية أعمدته للعرض، يجب أن نستخدم أسماء الأعمدة الأصلية للتصفية في pivot_df
+        # ثم نعيد إنشاء display_pivot من جديد أو نستخدم التصفية المباشرة بناءً على اسم العمود الأصلي (Total_Online_Hours) 
+        # الحل الأفضل: نطبق التصفية على pivot_df قبل إرسالها إلى analyze_performance وإعادة إنشاء display_pivot إذا تغيرت
+
+        filtered_pivot_df = pivot_df[pivot_df['Total_Online_Hours'] > 0].reset_index(drop=True)
+        
+        if len(filtered_pivot_df) < initial_pivot_count:
+             st.info(f"ℹ️ {initial_pivot_count - len(filtered_pivot_df)} agents with zero Total Online Hours were excluded from the final report and analysis.")
+
+        # إعادة إنشاء عرض Streamlit بالبيانات المصفاة
+        # نستخدم دالة generate_pivot_table على البيانات الأصلية ثم نطبق التصفية (للتأكد من صحة الحسابات)
+        # ولكن بما أن التصفية تمت في clean_and_process_data وفي analyze_performance، يكفي التصفية هنا للعرض فقط:
+
+        # بما أننا قمنا بإنشاء display_pivot بالفعل من pivot_df، سنقوم بتصفية pivot_df ومن ثم إعادة بناء display_pivot من النسخة المصفاة
+
+        display_pivot_filtered = filtered_pivot_df.rename(columns={
+            'Total_Delivered_Tasks': 'Total Delivered Tasks',
+            'Total_Online_Hours': 'Total Online Hours (h)',
+            'Tasks Per Hour': 'Tasks Per Hour (TPH)',
+            'Total_Cancelled_Tasks': 'Total Cancelled Tasks',
+            'Total_Rejected_Tasks': 'Total Rejected Tasks',
+            'Avg_On_time_Rate (%)': 'Avg On-time Rate (%)',
+            'Avg_Delivery_Time': 'Avg Delivery Time (min)',
+            'Avg_Cancellation_Rate (%)': 'Avg Cancellation Rate (%)'
+        }).drop(columns=['First Name', 'Last Name'], errors='ignore')
+        
+        
         st.header("📈 Consolidated Performance Report")
         
         # عرض الجدول المحوري المنسق بالإنجليزية
-        st.dataframe(display_pivot.style.format({
+        st.dataframe(display_pivot_filtered.style.format({
             'Total Online Hours (h)': '{:.2f}',
             'Tasks Per Hour (TPH)': '{:.2f}',
             'Avg Delivery Time (min)': '{:.2f}'
@@ -230,7 +268,7 @@ if uploaded_file is not None:
 
         st.download_button(
             label="⬇️ Export Detailed Excel Report",
-            data=to_excel(pivot_df),
+            data=to_excel(filtered_pivot_df), # نستخدم filtered_pivot_df للتصدير
             file_name="Keita_Delivery_Report_EN.xlsx",
             mime="application/vnd.ms-excel"
         )
@@ -238,7 +276,7 @@ if uploaded_file is not None:
         st.markdown("---")
 
         st.header("📝 Recommendations and Behavioral Analysis")
-        recommendations = analyze_performance(pivot_df)
+        recommendations = analyze_performance(filtered_pivot_df) # نستخدم filtered_pivot_df للتحليل
 
         if recommendations:
             st.warning(f"⚠️ **Alert:** **{len(recommendations)}** agents identified with below-average performance or behavioral issues (High Cancellation/Rejection):")
