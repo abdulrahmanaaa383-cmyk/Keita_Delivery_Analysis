@@ -20,6 +20,7 @@ st.set_page_config(
 # ==================================================================================
 DATA_FILE    = "delivery_data.json"
 DRIVERS_FILE = "drivers.json"
+CONFIG_FILE  = "config.json"
 
 ADMIN_PASSWORD = "admin123"   # <-- غيّر كلمة السر هنا
 
@@ -48,7 +49,7 @@ def get_driver_token(driver_name: str, day: str) -> str:
 # تحميل البيانات
 # ==================================================================================
 
-# ── قائمة المناديب: تُحفظ في drivers.json وتُدار من صفحة المدير ──
+# ── قائمة المناديب ──
 drivers_list = load_json(DRIVERS_FILE, [
     "أحمد محمد",
     "محمود علي",
@@ -56,6 +57,9 @@ drivers_list = load_json(DRIVERS_FILE, [
     "يوسف إبراهيم",
     "مصطفى عبدالله",
 ])
+
+# ── الإعدادات (الرابط الأساسي) ──
+config = load_json(CONFIG_FILE, {"base_url": "https://keitadeliveryanalysis-6zvs3tjytsugs3yweiq2s6.streamlit.app"})
 
 # ── بيانات الطلبات اليومية ──
 all_data = load_json(DATA_FILE, {})
@@ -155,9 +159,9 @@ if mode != "admin" and not driver_token:
 
     # رأس الجدول
     h1, h2, h3 = st.columns([3, 2, 2])
-    h1.markdown("** driver name**")
-    h2.markdown("**count orders**")
-    h3.markdown("**last update**")
+    h1.markdown("**اسم المندوب**")
+    h2.markdown("**عدد الطلبات**")
+    h3.markdown("**آخر تحديث**")
 
     inputs = {}
     for driver in drivers_list:
@@ -370,7 +374,7 @@ with tab1:
                 st.warning("اضغط مرة تانية للتأكيد")
 
 # ==================================================================================
-# تاب 2: إدارة المناديب  ← جديد
+# تاب 2: إدارة المناديب
 # ==================================================================================
 with tab2:
     st.markdown("### ➕ إضافة مناديب جدد")
@@ -389,7 +393,7 @@ with tab2:
                 drivers_list.append(name)
                 added += 1
         save_json(DRIVERS_FILE, drivers_list)
-        st.success(f"✅ تم إضافة {added} مندوب!")
+        st.success(f"✅ تم إضافة {added} مندوب! روح تاب 'روابط المناديب' عشان تشوف لينكه.")
         st.rerun()
 
     st.markdown("---")
@@ -433,23 +437,28 @@ with tab2:
 with tab3:
     st.info("⚠️ الروابط دي بتتغير كل يوم تلقائياً — ابعتها للمناديب كل صباح على واتساب.")
 
-    base_url = st.text_input(
+    # ── الرابط الأساسي محفوظ في config.json ──
+    saved_url = config.get("base_url", "https://keitadeliveryanalysis-6zvs3tjytsugs3yweiq2s6.streamlit.app")
+    base_url  = st.text_input(
         "🌐 رابط الموقع الأساسي",
-        value="https://your-app.streamlit.app",
+        value=saved_url,
         help="الرابط بتاع تطبيقك على Streamlit Cloud"
     )
+    if st.button("💾 حفظ الرابط", type="secondary"):
+        config["base_url"] = base_url
+        save_json(CONFIG_FILE, config)
+        st.success("✅ تم حفظ الرابط! مش هيتغير بعد كده.")
 
-    st.markdown("### روابط اليوم لكل المندوب")
+    st.markdown("---")
+    st.markdown("### روابط اليوم لكل مندوب")
     for driver in drivers_list:
         token     = get_driver_token(driver, today)
         full_link = f"{base_url}?driver={token}"
-        col_name, col_link, col_copy = st.columns([2, 4, 1])
+        col_name, col_link = st.columns([2, 5])
         with col_name:
             st.write(f"**{driver}**")
         with col_link:
             st.markdown(f'<div class="link-box">{full_link}</div>', unsafe_allow_html=True)
-        with col_copy:
-            st.code(token, language=None)
 
     st.markdown("---")
     st.markdown("### رسالة واتساب جاهزة (انسخها وابعتها)")
