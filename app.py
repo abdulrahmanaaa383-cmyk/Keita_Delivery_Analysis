@@ -2,8 +2,16 @@ import streamlit as st
 import pandas as pd
 import json
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timezone, timedelta
 from io import BytesIO
+
+# ==================================================================================
+# التوقيت السعودي UTC+3
+# ==================================================================================
+SAUDI_TZ = timezone(timedelta(hours=3))
+
+def now_saudi():
+    return datetime.now(SAUDI_TZ)
 
 # ==================================================================================
 # إعداد الصفحة
@@ -38,7 +46,7 @@ def save_json(path, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 def get_today():
-    return date.today().strftime("%Y-%m-%d")
+    return now_saudi().strftime("%Y-%m-%d")
 
 def get_driver_token(driver_name: str, day: str) -> str:
     import hashlib
@@ -153,15 +161,15 @@ st.markdown("""
 if mode != "admin" and not driver_token:
 
     st.markdown("## 🚚 Enter your number of orders for today.")
-    st.caption(f"📅 {datetime.now().strftime('%A %d/%m/%Y')}")
-    st.info("كل مندوب يكتب عدد طلباته جنب اسمه ويضغط **save all** في الآخر")
+    st.caption(f"📅 {now_saudi().strftime('%A %d/%m/%Y')}")
+    st.info("Each driver enters their order count next to their name, then press **Save All** at the bottom.")
     st.markdown("---")
 
-    # رأس الجدول
+    # Header
     h1, h2, h3 = st.columns([3, 2, 2])
-    h1.markdown("**اسم المندوب**")
-    h2.markdown("**عدد الطلبات**")
-    h3.markdown("**آخر تحديث**")
+    h1.markdown("**Driver Name**")
+    h2.markdown("**Number of Orders**")
+    h3.markdown("**Last Updated**")
 
     inputs = {}
     for driver in drivers_list:
@@ -192,32 +200,32 @@ if mode != "admin" and not driver_token:
 
     st.markdown("---")
 
-    if st.button("💾 حفظ الكل", type="primary", use_container_width=True):
-        now_time = datetime.now().strftime("%H:%M")
+    if st.button("💾 Save All", type="primary", use_container_width=True):
+        now_time = now_saudi().strftime("%H:%M")
         for driver, count in inputs.items():
             if count > 0 or driver in all_data[today]:
                 all_data[today][driver] = {"count": count, "time": now_time}
         save_json(DATA_FILE, all_data)
-        st.success("✅ تم الحفظ! البيانات ظهرت عند المدير دلوقتي.")
+        st.success("✅ Saved successfully! The manager can now see the data.")
         st.rerun()
 
     st.markdown("---")
-    st.caption("🔐 [دخول المدير](?mode=admin)")
+    st.caption("🔐 [Admin Login](?mode=admin)")
     st.stop()
 
 # ==================================================================================
 # ██  صفحة المندوب الفردي (توكن يومي)  ██
 # ==================================================================================
 if current_driver:
-    st.title(f"🚚 أهلاً، {current_driver}")
-    st.caption(f"📅 اليوم: {datetime.now().strftime('%A %d/%m/%Y')}")
+    st.title(f"🚚 Hello, {current_driver}")
+    st.caption(f"📅 Today: {now_saudi().strftime('%A %d/%m/%Y')}")
     st.markdown("---")
 
     prev_count = all_data[today].get(current_driver, {}).get("count", 0)
 
-    st.subheader("📦Enter your number of orders for today.")
+    st.subheader("📦 Enter your number of orders for today.")
     count = st.number_input(
-        "عدد الطلبات",
+        "Number of Orders",
         min_value=0,
         max_value=999,
         value=prev_count,
@@ -225,19 +233,19 @@ if current_driver:
         label_visibility="collapsed"
     )
 
-    if st.button("✅ إرسال", use_container_width=True, type="primary"):
+    if st.button("✅ Submit", use_container_width=True, type="primary"):
         all_data[today][current_driver] = {
             "count": count,
-            "time": datetime.now().strftime("%H:%M")
+            "time": now_saudi().strftime("%H:%M")
         }
         save_json(DATA_FILE, all_data)
         st.markdown(
-            '<div class="success-banner">✓ تم الإرسال بنجاح! المدير شايف طلباتك دلوقتي.</div>',
+            '<div class="success-banner">✓ Submitted successfully! The manager can see your orders now.</div>',
             unsafe_allow_html=True
         )
 
     if prev_count > 0:
-        st.info(f"آخر قيمة مسجلة: **{prev_count}** طلب")
+        st.info(f"Last recorded value: **{prev_count}** orders")
 
     st.stop()
 
@@ -245,7 +253,7 @@ if current_driver:
 # ██  توكن غلط  ██
 # ==================================================================================
 if driver_token and not current_driver:
-    st.error("❌ الرابط ده مش صحيح أو انتهى صلاحيته. طلب رابط جديد من المدير.")
+    st.error("❌ This link is invalid or has expired. Please request a new link from the manager.")
     st.stop()
 
 # ==================================================================================
@@ -267,7 +275,7 @@ if not st.session_state["admin_logged_in"]:
 
 # ---- الداشبورد ----
 st.title("🗂️ داشبورد المناديب")
-st.caption(f"📅 {datetime.now().strftime('%A %d/%m/%Y %H:%M')}")
+st.caption(f"📅 {now_saudi().strftime('%A %d/%m/%Y %H:%M')}")
 
 today_data     = all_data.get(today, {})
 total_orders   = sum(v.get("count", 0) for v in today_data.values())
@@ -462,7 +470,7 @@ with tab3:
 
     st.markdown("---")
     st.markdown("### رسالة واتساب جاهزة (انسخها وابعتها)")
-    wa_msg  = f"🚚 *تقرير الطلبات - {datetime.now().strftime('%d/%m/%Y')}*\n\n"
+    wa_msg  = f"🚚 *تقرير الطلبات - {now_saudi().strftime('%d/%m/%Y')}*\n\n"
     wa_msg += "كل مندوب يفتح رابطه ويحدث عدد طلباته:\n\n"
     for driver in drivers_list:
         token   = get_driver_token(driver, today)
