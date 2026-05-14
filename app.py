@@ -155,9 +155,9 @@ if mode != "admin" and not driver_token:
 
     # رأس الجدول
     h1, h2, h3 = st.columns([3, 2, 2])
-    h1.markdown("**اسم المندوب**")
-    h2.markdown("**عدد الطلبات**")
-    h3.markdown("**آخر تحديث**")
+    h1.markdown("** driver name**")
+    h2.markdown("**count orders**")
+    h3.markdown("**last update**")
 
     inputs = {}
     for driver in drivers_list:
