@@ -95,6 +95,8 @@ if driver_token:
 # ==================================================================================
 st.markdown("""
 <style>
+    header[data-testid="stHeader"] { display: none !important; }
+    #MainMenu { visibility: hidden !important; }
     @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap');
     * { font-family: 'Cairo', sans-serif !important; direction: rtl; }
     .block-container { padding-top: 1.5rem !important; }
