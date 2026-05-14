@@ -269,8 +269,8 @@ today_data     = all_data.get(today, {})
 total_orders   = sum(v.get("count", 0) for v in today_data.values())
 active_drivers = sum(1 for v in today_data.values() if v.get("count", 0) > 0)
 avg_orders     = round(total_orders / active_drivers, 1) if active_drivers > 0 else 0
-top_driver     = max(today_data, key=lambda d: today_data[d].get("count", 0), default="-")
-top_val        = today_data.get(top_driver, {}).get("count", 0)
+top_driver     = max(today_data, key=lambda d: today_data[d].get("count", 0), default="-") if today_data else "-"
+top_val        = today_data.get(top_driver, {}).get("count", 0) if top_driver != "-" else 0
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
@@ -331,8 +331,9 @@ with tab1:
                 "عدد الطلبات": entry.get("count", 0),
                 "آخر تحديث":   entry.get("time", "-")
             })
-        df_export = pd.DataFrame(rows)
-        df_export.loc[len(df_export)] = ["الإجمالي", df_export["عدد الطلبات"].sum(), ""]
+        df_export = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["اسم المندوب", "عدد الطلبات", "آخر تحديث"])
+        total_val = df_export["عدد الطلبات"].sum() if not df_export.empty else 0
+        df_export.loc[len(df_export)] = ["الإجمالي", total_val, ""]
 
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
