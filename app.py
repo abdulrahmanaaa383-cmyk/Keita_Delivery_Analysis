@@ -152,9 +152,9 @@ st.markdown("""
 # ==================================================================================
 if mode != "admin" and not driver_token:
 
-    st.markdown("## 🚚 إدخال الطلبات اليومية")
+    st.markdown("## 🚚 Enter your number of orders for today.")
     st.caption(f"📅 {datetime.now().strftime('%A %d/%m/%Y')}")
-    st.info("كل مندوب يكتب عدد طلباته جنب اسمه ويضغط **حفظ الكل** في الآخر")
+    st.info("كل مندوب يكتب عدد طلباته جنب اسمه ويضغط **save all** في الآخر")
     st.markdown("---")
 
     # رأس الجدول
@@ -215,7 +215,7 @@ if current_driver:
 
     prev_count = all_data[today].get(current_driver, {}).get("count", 0)
 
-    st.subheader("📦 أدخل عدد طلباتك النهارده")
+    st.subheader("📦Enter your number of orders for today.")
     count = st.number_input(
         "عدد الطلبات",
         min_value=0,
