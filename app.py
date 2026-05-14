@@ -1,298 +1,359 @@
 import streamlit as st
 import pandas as pd
+import json
+import os
+from datetime import date, datetime
 from io import BytesIO
-import numpy as np
 
-# ==============================================================================
-# 1. الدوال المساعدة لتحميل ومعالجة البيانات
-# ==============================================================================
+# ==================================================================================
+# إعداد الصفحة
+# ==================================================================================
+st.set_page_config(
+    page_title="تتبع طلبات المناديب",
+    page_icon="🚚",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
 
-def clean_and_process_data(df):
-    """
-    تنظيف وتوحيد أسماء الأعمدة وتحويل البيانات للتحليل.
-    """
-    
-    # تنظيف أسماء الأعمدة من المسافات الزائدة
-    df.columns = df.columns.str.strip()
-    
-    # التحديد الدقيق لخرائط الأسماء من ملف المستخدم إلى الأسماء الداخلية للكود 
-    COLUMN_MAPPING = {
-        'Courier ID': 'ID',
-        'Courier First Name': 'First Name',
-        'Courier Last Name': 'Last Name',
-        'Valid Online Time': 'Online Time (h)',
-        'Delivered Tasks': 'Delivered Tasks',
-        'Cancelled Tasks': 'Cancelled Tasks',
-        'Rejected Tasks': 'Rejected Tasks',
-        'On-time Rate (D)': 'On-time Rate',
-        'Avg Delivery Time of Delivered Orders': 'Avg Delivery Time (min)',
-        'Cancellation Rate from Delivery Issues': 'Cancellation Rate'
+# ==================================================================================
+# قائمة المناديب — عدّل الأسماء هنا
+# ==================================================================================
+DRIVERS = [
+    "أحمد محمد",
+    "محمود علي",
+    "عمر حسن",
+    "يوسف إبراهيم",
+    "مصطفى عبدالله",
+    # أضف باقي الأسماء هنا حتى 40 مندوب
+    # "اسم المندوب 6",
+    # "اسم المندوب 7",
+    # ...
+]
+
+# ==================================================================================
+# ملف حفظ البيانات
+# ==================================================================================
+DATA_FILE = "delivery_data.json"
+
+def load_data() -> dict:
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def save_data(data: dict):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def get_today() -> str:
+    return date.today().strftime("%Y-%m-%d")
+
+def get_driver_token(driver_name: str, day: str) -> str:
+    """يولّد رمز يومي فريد لكل مندوب — يتغير كل يوم تلقائياً"""
+    import hashlib
+    raw = f"{driver_name}_{day}_secret_key_2025"
+    return hashlib.md5(raw.encode()).hexdigest()[:10]
+
+# ==================================================================================
+# تحميل البيانات
+# ==================================================================================
+all_data = load_data()
+today = get_today()
+if today not in all_data:
+    all_data[today] = {}
+
+# ==================================================================================
+# تحديد نوع الصفحة (مدير أو مندوب)
+# ==================================================================================
+query_params = st.query_params
+driver_token = query_params.get("driver", None)
+
+# تحقق هل التوكن يطابق مندوباً اليوم
+current_driver = None
+if driver_token:
+    for d in DRIVERS:
+        if get_driver_token(d, today) == driver_token:
+            current_driver = d
+            break
+
+# ==================================================================================
+# CSS مشترك
+# ==================================================================================
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap');
+    * { font-family: 'Cairo', sans-serif !important; direction: rtl; }
+    .metric-box {
+        background: #f8f9fa;
+        border-radius: 12px;
+        padding: 1rem 1.25rem;
+        text-align: center;
+        border: 1px solid #e9ecef;
     }
-    
-    # إعادة تسمية الأعمدة الموجودة في الملف إلى الأسماء القياسية التي يستخدمها الكود
-    df = df.rename(columns=COLUMN_MAPPING, errors='ignore')
-
-    # التأكد من تحويل الأعمدة الرقمية إلى النوع float باستخدام الأسماء الداخلية الجديدة
-    for col in [
-        'Online Time (h)', 'Delivered Tasks', 'On-time Rate', 
-        'Avg Delivery Time (min)', 'Cancellation Rate',
-        'Cancelled Tasks', 'Rejected Tasks'
-    ]:
-        if col in df.columns:
-            # معالجة القيم التي قد تكون نسب مئوية أو سلاسل نصية
-            df[col] = df[col].astype(str).str.replace('[^0-9.+-]', '', regex=True)
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-    
-    # تصفية الصفوف التي لا تحتوي على ID للمندوب أو ساعات عمل فعالة
-    df = df.dropna(subset=['ID'])
-    if 'Online Time (h)' in df.columns:
-         df = df[df['Online Time (h)'] > 0].reset_index(drop=True)
-    
-    return df
-
-def generate_pivot_table(df):
-    """ينشئ الجدول المحوري (Pivot Table) بتجميع مؤشرات الأداء."""
-    
-    # تجميع البيانات حسب المندوب
-    pivot_df = df.groupby(['ID', 'First Name', 'Last Name']).agg(
-        Total_Delivered_Tasks=('Delivered Tasks', 'sum'),
-        Total_Online_Hours=('Online Time (h)', 'sum'),
-        Total_Cancelled_Tasks=('Cancelled Tasks', 'sum'),
-        Total_Rejected_Tasks=('Rejected Tasks', 'sum'),
-        Avg_On_time_Rate=('On-time Rate', 'mean'),
-        Avg_Delivery_Time=('Avg Delivery Time (min)', 'mean'),
-        Avg_Cancellation_Rate=('Cancellation Rate', 'mean')
-    ).reset_index()
-
-    # إنشاء عمود الاسم الكامل
-    pivot_df['Agent Name'] = pivot_df['First Name'] + ' ' + pivot_df['Last Name']
-
-    # حساب مؤشر الإنتاجية الأساسي: عدد الطلبات في الساعة (Tasks Per Hour)
-    # التأكد من عدم القسمة على صفر
-    pivot_df['Tasks Per Hour'] = np.where(
-        pivot_df['Total_Online_Hours'] > 0,
-        (pivot_df['Total_Delivered_Tasks'] / pivot_df['Total_Online_Hours']),
-        0
-    ).round(2)
-    
-    # تنسيق النسب المئوية 
-    pivot_df['Avg_On_time_Rate (%)'] = (pivot_df['Avg_On_time_Rate'] * 100).round(2).astype(str) + '%'
-    pivot_df['Avg_Cancellation_Rate (%)'] = (pivot_df['Avg_Cancellation_Rate'] * 100).round(2).astype(str) + '%'
-    
-    # إعادة ترتيب الأعمدة للعرض النهائي (مع إضافة الملغاة والمرفوضة)
-    pivot_df = pivot_df[['ID', 'Agent Name', 
-                         'Total_Delivered_Tasks', 'Total_Online_Hours', 'Tasks Per Hour',
-                         'Total_Cancelled_Tasks', 'Total_Rejected_Tasks',
-                         'Avg_On_time_Rate (%)', 'Avg_Delivery_Time', 'Avg_Cancellation_Rate (%)']]
-    
-    # 🌟 تحديث: إعادة تسمية الأعمدة للعرض باللغة الإنجليزية 🌟
-    display_cols = {
-        'Total_Delivered_Tasks': 'Total Delivered Tasks',
-        'Total_Online_Hours': 'Total Online Hours (h)',
-        'Tasks Per Hour': 'Tasks Per Hour (TPH)',
-        'Total_Cancelled_Tasks': 'Total Cancelled Tasks',
-        'Total_Rejected_Tasks': 'Total Rejected Tasks',
-        'Avg_On_time_Rate (%)': 'Avg On-time Rate (%)',
-        'Avg_Delivery_Time': 'Avg Delivery Time (min)',
-        'Avg_Cancellation_Rate (%)': 'Avg Cancellation Rate (%)'
+    .metric-val { font-size: 2rem; font-weight: 700; color: #1D9E75; }
+    .metric-lbl { font-size: 0.85rem; color: #6c757d; margin-top: 4px; }
+    .driver-card {
+        background: white;
+        border-radius: 10px;
+        padding: 0.75rem 1rem;
+        border: 1px solid #e9ecef;
+        margin-bottom: 8px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
     }
-    
-    # المتغير الذي يحمل الجدول المنسق للعرض في Streamlit
-    display_df = pivot_df.rename(columns=display_cols).drop(columns=['First Name', 'Last Name'], errors='ignore')
-    
-    return pivot_df, display_df
-
-def analyze_performance(pivot_df):
-    """تطبيق منطق العمل لإنشاء توصيات بناءً على المقارنة بالمتوسط."""
-    recommendations = {}
-
-    analysis_df = pivot_df.copy()
-    
-    # 🌟 الإضافة الجديدة: تصفية المناديب الذين ليس لديهم ساعات عمل فعلية (ساعات = صفر) 🌟
-    initial_count = len(analysis_df)
-    analysis_df = analysis_df[analysis_df['Total_Online_Hours'] > 0].reset_index(drop=True)
-    
-    if len(analysis_df) < initial_count:
-        st.info(f"ℹ️ {initial_count - len(analysis_df)} agents were excluded from the analysis because their Total Online Hours were zero.")
-
-    # تحويل النسب المئوية إلى أرقام للتحليل
-    analysis_df['On_time_Rate_Num'] = analysis_df['Avg_On_time_Rate (%)'].str.replace('%', '').astype(float) / 100
-    analysis_df['Cancellation_Rate_Num'] = analysis_df['Avg_Cancellation_Rate (%)'].str.replace('%', '').astype(float) / 100
-    
-    # حساب المتوسطات للمقارنة
-    avg_ontime = analysis_df['On_time_Rate_Num'].mean()
-    avg_delivery_time = analysis_df['Avg_Delivery_Time'].mean()
-    avg_cancellation_rate = analysis_df['Cancellation_Rate_Num'].mean()
-    avg_tph = analysis_df['Tasks Per Hour'].mean()
-    avg_cancelled_count = analysis_df['Total_Cancelled_Tasks'].mean()
-    avg_rejected_count = analysis_df['Total_Rejected_Tasks'].mean()
-    
-    # تعريف الحدود الدنيا/القصوى
-    LOW_PERFORMANCE_THRESHOLD = 0.8 
-    HIGH_PERFORMANCE_THRESHOLD = 1.2 
-
-    for index, row in analysis_df.iterrows():
-        agent_name = row['Agent Name']
-        notes = []
-
-        # 1. تحليل كفاءة التسليم والالتزام بالوقت
-        if row['On_time_Rate_Num'] < (avg_ontime * LOW_PERFORMANCE_THRESHOLD):
-            notes.append(f"🔴 Low On-Time Rate: {row['Avg_On_time_Rate (%)']} — Needs path management improvement.")
-        
-        # 2. تحليل سرعة التسليم
-        if row['Avg_Delivery_Time'] > (avg_delivery_time * HIGH_PERFORMANCE_THRESHOLD) and row['Total_Delivered_Tasks'] > 0:
-            notes.append(f"🟡 High Delivery Time: {row['Avg_Delivery_Time']:.2f} min — Needs speed/movement improvement.")
-        
-        # 3. تحليل معدل الإلغاء (النسبة)
-        if row['Cancellation_Rate_Num'] > (avg_cancellation_rate * HIGH_PERFORMANCE_THRESHOLD) and row['Cancellation_Rate_Num'] * 100 > 2:
-            notes.append(f"❌ High Cancellation Rate (Ratio): {row['Avg_Cancellation_Rate (%)']} — Requires review of cancellation reasons.")
-        
-        # 4. تحليل إجمالي الطلبات الملغاة (العدد)
-        if row['Total_Cancelled_Tasks'] > (avg_cancelled_count * HIGH_PERFORMANCE_THRESHOLD) and row['Total_Cancelled_Tasks'] >= 5:
-             notes.append(f"🔥 High Total Cancellations: {int(row['Total_Cancelled_Tasks'])} tasks. Review task acceptance behavior or location/communication issues.")
-
-        # 5. تحليل إجمالي الطلبات المرفوضة (العدد)
-        if row['Total_Rejected_Tasks'] > (avg_rejected_count * HIGH_PERFORMANCE_THRESHOLD) and row['Total_Rejected_Tasks'] >= 10:
-             notes.append(f"🛑 High Total Rejections: {int(row['Total_Rejected_Tasks'])} tasks. May indicate hesitation in accepting tasks or negative perception of certain areas.")
-        
-        # 6. الإنتاجية
-        if row['Tasks Per Hour'] < (avg_tph * LOW_PERFORMANCE_THRESHOLD) and row['Total_Online_Hours'] > 5:
-            notes.append(f"📉 Low Productivity: {row['Tasks Per Hour']:.2f} TPH — Recommend working during peak hours or reviewing waiting process.")
-
-        if notes:
-            recommendations[agent_name] = {'ID': row['ID'], 'Notes': notes}
-
-    return recommendations
-
-def to_excel(df):
-    """دالة لتحويل DataFrame إلى ملف Excel في الذاكرة."""
-    output = BytesIO()
-    
-    # إعادة تسمية الأعمدة النهائية في ملف الإكسيل بالإنجليزية
-    export_df = df.copy()
-    # 🌟 تحديث: أسماء الأعمدة للتصدير بالإنجليزية 🌟
-    english_cols = {
-        'ID': 'Courier ID',
-        'Agent Name': 'Agent Full Name',
-        'Total_Delivered_Tasks': 'Total Delivered Tasks',
-        'Total_Online_Hours': 'Total Online Hours (h)',
-        'Tasks Per Hour': 'Tasks Per Hour (TPH)',
-        'Total_Cancelled_Tasks': 'Total Cancelled Tasks',
-        'Total_Rejected_Tasks': 'Total Rejected Tasks',
-        'Avg_On_time_Rate (%)': 'Avg On-time Rate (%)',
-        'Avg_Delivery_Time': 'Avg Delivery Time (min)',
-        'Avg_Cancellation_Rate (%)': 'Avg Cancellation Rate (%)'
+    .driver-name { font-weight: 600; font-size: 0.95rem; }
+    .driver-count { font-size: 1.4rem; font-weight: 700; color: #1D9E75; }
+    .driver-count.zero { color: #adb5bd; }
+    .link-box {
+        background: #f1f3f5;
+        border-radius: 8px;
+        padding: 8px 12px;
+        font-family: monospace;
+        font-size: 0.8rem;
+        word-break: break-all;
+        color: #495057;
+        border: 1px solid #dee2e6;
     }
-    
-    export_df = export_df.rename(columns=english_cols)
-    
-    # تنسيق الأعمدة الرقمية قبل التصدير
-    for col in ['Total Delivered Tasks', 'Total Cancelled Tasks', 'Total Rejected Tasks']:
-        if col in export_df.columns:
-            export_df[col] = export_df[col].round(0).astype(int)
+    .stButton > button {
+        border-radius: 8px;
+        font-family: 'Cairo', sans-serif !important;
+    }
+    div[data-testid="stMetricValue"] { direction: ltr; }
+    .success-banner {
+        background: #d4edda;
+        color: #155724;
+        padding: 12px 16px;
+        border-radius: 8px;
+        font-weight: 600;
+        text-align: center;
+        margin: 1rem 0;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        export_df.to_excel(writer, index=False, sheet_name='Keita_Performance_Report')
-        
-    return output.getvalue()
+# ==================================================================================
+# صفحة المندوب
+# ==================================================================================
+if current_driver:
+    st.title(f"🚚 أهلاً، {current_driver}")
+    st.caption(f"📅 اليوم: {datetime.now().strftime('%A %d/%m/%Y')}")
+    st.markdown("---")
 
-# ==============================================================================
-# 2. واجهة التطبيق (Streamlit)
-# ==============================================================================
+    prev_count = all_data[today].get(current_driver, {}).get("count", 0)
 
-st.set_page_config(layout="wide", page_title="Advanced Delivery Agent Performance Analyzer (Keita)")
-st.title("🛵 Advanced Delivery Agent Performance Analyzer (Keita)")
-st.markdown("---")
+    st.subheader("📦 أدخل عدد طلباتك النهارده")
+    count = st.number_input(
+        "عدد الطلبات",
+        min_value=0,
+        max_value=999,
+        value=prev_count,
+        step=1,
+        label_visibility="collapsed"
+    )
 
-uploaded_file = st.file_uploader("📥 Please upload your Excel/CSV file for performance analysis", type=["xlsx", "xls", "csv"])
-
-if uploaded_file is not None:
-    try:
-        # قراءة الملف (مع افتراض أن الملف قد يحتوي على CSV أو Excel)
-        df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
-        st.success(f"File loaded successfully: {uploaded_file.name} — Records: {len(df)}")
-        
-        # 1. تنظيف وإعادة تسمية الأعمدة
-        df = clean_and_process_data(df)
-        
-        if df.empty:
-            st.error("❌ No valid data for analysis (Ensure agents have active online hours).")
-            st.stop()
-            
-        st.subheader("📋 Processed Data (First 5 Rows)")
-        st.dataframe(df.head(), use_container_width=True, hide_index=True)
-        st.markdown("---")
-
-        # 2. إنشاء الجدول المحوري
-        pivot_df, display_pivot = generate_pivot_table(df)
-        
-        # 🌟 تصفية التقرير المجمع هنا أيضاً ليعكس نفس المنطق 🌟
-        # نستخدم نسخة الـ display_pivot لأنها هي التي يتم عرضها مباشرة
-        initial_pivot_count = len(display_pivot)
-        
-        # بما أن display_pivot هي الجدول المعاد تسمية أعمدته للعرض، يجب أن نستخدم أسماء الأعمدة الأصلية للتصفية في pivot_df
-        # ثم نعيد إنشاء display_pivot من جديد أو نستخدم التصفية المباشرة بناءً على اسم العمود الأصلي (Total_Online_Hours) 
-        # الحل الأفضل: نطبق التصفية على pivot_df قبل إرسالها إلى analyze_performance وإعادة إنشاء display_pivot إذا تغيرت
-
-        filtered_pivot_df = pivot_df[pivot_df['Total_Online_Hours'] > 0].reset_index(drop=True)
-        
-        if len(filtered_pivot_df) < initial_pivot_count:
-             st.info(f"ℹ️ {initial_pivot_count - len(filtered_pivot_df)} agents with zero Total Online Hours were excluded from the final report and analysis.")
-
-        # إعادة إنشاء عرض Streamlit بالبيانات المصفاة
-        # نستخدم دالة generate_pivot_table على البيانات الأصلية ثم نطبق التصفية (للتأكد من صحة الحسابات)
-        # ولكن بما أن التصفية تمت في clean_and_process_data وفي analyze_performance، يكفي التصفية هنا للعرض فقط:
-
-        # بما أننا قمنا بإنشاء display_pivot بالفعل من pivot_df، سنقوم بتصفية pivot_df ومن ثم إعادة بناء display_pivot من النسخة المصفاة
-
-        display_pivot_filtered = filtered_pivot_df.rename(columns={
-            'Total_Delivered_Tasks': 'Total Delivered Tasks',
-            'Total_Online_Hours': 'Total Online Hours (h)',
-            'Tasks Per Hour': 'Tasks Per Hour (TPH)',
-            'Total_Cancelled_Tasks': 'Total Cancelled Tasks',
-            'Total_Rejected_Tasks': 'Total Rejected Tasks',
-            'Avg_On_time_Rate (%)': 'Avg On-time Rate (%)',
-            'Avg_Delivery_Time': 'Avg Delivery Time (min)',
-            'Avg_Cancellation_Rate (%)': 'Avg Cancellation Rate (%)'
-        }).drop(columns=['First Name', 'Last Name'], errors='ignore')
-        
-        
-        st.header("📈 Consolidated Performance Report")
-        
-        # عرض الجدول المحوري المنسق بالإنجليزية
-        st.dataframe(display_pivot_filtered.style.format({
-            'Total Online Hours (h)': '{:.2f}',
-            'Tasks Per Hour (TPH)': '{:.2f}',
-            'Avg Delivery Time (min)': '{:.2f}'
-        }), use_container_width=True, hide_index=True)
-
-        st.download_button(
-            label="⬇️ Export Detailed Excel Report",
-            data=to_excel(filtered_pivot_df), # نستخدم filtered_pivot_df للتصدير
-            file_name="Keita_Delivery_Report_EN.xlsx",
-            mime="application/vnd.ms-excel"
+    if st.button("✅ إرسال", use_container_width=True, type="primary"):
+        all_data[today][current_driver] = {
+            "count": count,
+            "time": datetime.now().strftime("%H:%M")
+        }
+        save_data(all_data)
+        st.markdown(
+            '<div class="success-banner">✓ تم الإرسال بنجاح! المدير شايف طلباتك دلوقتي.</div>',
+            unsafe_allow_html=True
         )
 
-        st.markdown("---")
+    if prev_count > 0:
+        st.info(f"آخر قيمة مسجلة: **{prev_count}** طلب")
 
-        st.header("📝 Recommendations and Behavioral Analysis")
-        recommendations = analyze_performance(filtered_pivot_df) # نستخدم filtered_pivot_df للتحليل
+    st.stop()
 
-        if recommendations:
-            st.warning(f"⚠️ **Alert:** **{len(recommendations)}** agents identified with below-average performance or behavioral issues (High Cancellation/Rejection):")
-            for agent, data in recommendations.items():
-                st.markdown(f"### 👤 Agent: {agent} (ID: {data['ID']})")
-                for note in data['Notes']:
-                    st.markdown(f"- {note}")
-                st.markdown("---")
-        else:
-            st.balloons()
-            st.success("🎉 **No immediate issues found!** Overall performance is within acceptable limits.")
+# ==================================================================================
+# صفحة غير معروفة (توكن خاطئ)
+# ==================================================================================
+if driver_token and not current_driver:
+    st.error("❌ الرابط ده مش صحيح أو انتهى صلاحيته. طلب رابط جديد من المدير.")
+    st.stop()
 
-    except Exception as e:
-        # عرض رسالة خطأ أكثر فائدة في حال وجود أي خطأ آخر
-        st.error(f"❌ An error occurred while reading or processing the file. Please ensure column names and numeric data format are correct.")
-        # هنا نعرض الخطأ الفني في الواجهة لمساعدتنا في التصحيح
-        st.exception(e)
-else:
-    st.info("Upload the file to start the performance analysis.")
+# ==================================================================================
+# صفحة المدير (الداشبورد)
+# ==================================================================================
+st.title("🗂️ داشبورد المناديب")
+st.caption(f"📅 {datetime.now().strftime('%A %d/%m/%Y %H:%M')}")
+
+# ---- مقاييس سريعة ----
+today_data = all_data.get(today, {})
+total_orders = sum(v.get("count", 0) for v in today_data.values())
+active_drivers = sum(1 for v in today_data.values() if v.get("count", 0) > 0)
+avg_orders = round(total_orders / active_drivers, 1) if active_drivers > 0 else 0
+top_driver = max(today_data, key=lambda d: today_data[d].get("count", 0), default="-")
+top_val = today_data.get(top_driver, {}).get("count", 0)
+
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    st.metric("📦 إجمالي الطلبات", total_orders)
+with col2:
+    st.metric("👤 مناديب بطلبات", f"{active_drivers}/{len(DRIVERS)}")
+with col3:
+    st.metric("📊 متوسط/مندوب", avg_orders)
+with col4:
+    st.metric("🏆 الأعلى أداء", f"{top_driver.split()[0]} ({top_val})" if top_val > 0 else "-")
+
+st.markdown("---")
+
+# ---- تبويبات ----
+tab1, tab2, tab3 = st.tabs(["📋 الطلبات اليومية", "🔗 روابط المناديب", "📁 الأرشيف"])
+
+# ==================================================================================
+# تاب 1: الطلبات اليومية
+# ==================================================================================
+with tab1:
+    col_search, col_refresh = st.columns([3, 1])
+    with col_search:
+        search = st.text_input("🔍 ابحث عن مندوب", placeholder="اكتب اسم المندوب...")
+    with col_refresh:
+        if st.button("🔄 تحديث", use_container_width=True):
+            st.rerun()
+
+    filtered = [d for d in DRIVERS if search.lower() in d.lower()] if search else DRIVERS
+
+    # عرض كروت المناديب
+    cols = st.columns(3)
+    for i, driver in enumerate(filtered):
+        entry = today_data.get(driver, {})
+        count = entry.get("count", 0)
+        time_str = entry.get("time", None)
+        with cols[i % 3]:
+            color = "#1D9E75" if count > 0 else "#adb5bd"
+            status = f"⏰ {time_str}" if time_str else "⚪ لم يُبلّغ بعد"
+            st.markdown(f"""
+            <div class="driver-card">
+                <div>
+                    <div class="driver-name">{driver}</div>
+                    <div style="font-size:0.78rem; color:#6c757d;">{status}</div>
+                </div>
+                <div class="driver-count {'zero' if count == 0 else ''}" style="color:{color}">
+                    {count}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # تصدير Excel
+    col_exp, col_reset = st.columns([2, 1])
+    with col_exp:
+        rows = []
+        for driver in DRIVERS:
+            entry = today_data.get(driver, {})
+            rows.append({
+                "اسم المندوب": driver,
+                "عدد الطلبات": entry.get("count", 0),
+                "آخر تحديث": entry.get("time", "-")
+            })
+        df_export = pd.DataFrame(rows)
+        df_export.loc[len(df_export)] = ["الإجمالي", df_export["عدد الطلبات"].sum(), ""]
+
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            df_export.to_excel(writer, index=False, sheet_name=today)
+            workbook = writer.book
+            worksheet = writer.sheets[today]
+            header_fmt = workbook.add_format({
+                'bold': True, 'bg_color': '#1D9E75', 'font_color': 'white',
+                'border': 1, 'align': 'center'
+            })
+            for col_num, value in enumerate(df_export.columns.values):
+                worksheet.write(0, col_num, value, header_fmt)
+            worksheet.set_column(0, 0, 25)
+            worksheet.set_column(1, 2, 18)
+
+        st.download_button(
+            label="⬇️ تحميل تقرير Excel",
+            data=output.getvalue(),
+            file_name=f"مناديب_{today}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
+
+    with col_reset:
+        if st.button("🗑️ تصفير اليوم", use_container_width=True, type="secondary"):
+            if st.session_state.get("confirm_reset"):
+                all_data[today] = {}
+                save_data(all_data)
+                st.session_state["confirm_reset"] = False
+                st.success("تم التصفير!")
+                st.rerun()
+            else:
+                st.session_state["confirm_reset"] = True
+                st.warning("اضغط مرة تانية للتأكيد")
+
+# ==================================================================================
+# تاب 2: روابط المناديب
+# ==================================================================================
+with tab2:
+    st.info("⚠️ الروابط دي بتتغير كل يوم تلقائياً — ابعتها للمناديب كل صباح على واتساب.")
+
+    # زر لإنشاء رسالة واتساب جماعية
+    base_url = st.text_input(
+        "🌐 رابط الموقع الأساسي",
+        value="https://your-app.streamlit.app",
+        help="الرابط بتاع تطبيقك على Streamlit Cloud"
+    )
+
+    st.markdown("### روابط اليوم لكل المناديب")
+
+    for driver in DRIVERS:
+        token = get_driver_token(driver, today)
+        full_link = f"{base_url}?driver={token}"
+        col_name, col_link, col_copy = st.columns([2, 4, 1])
+        with col_name:
+            st.write(f"**{driver}**")
+        with col_link:
+            st.markdown(f'<div class="link-box">{full_link}</div>', unsafe_allow_html=True)
+        with col_copy:
+            st.code(token, language=None)
+
+    st.markdown("---")
+    st.markdown("### رسالة واتساب جاهزة (انسخها وابعتها)")
+    wa_msg = f"🚚 *تقرير الطلبات - {datetime.now().strftime('%d/%m/%Y')}*\n\n"
+    wa_msg += "كل مندوب يفتح رابطه ويحدث عدد طلباته:\n\n"
+    for driver in DRIVERS:
+        token = get_driver_token(driver, today)
+        wa_msg += f"▫️ {driver}: {base_url}?driver={token}\n"
+    st.text_area("رسالة واتساب", wa_msg, height=300)
+
+# ==================================================================================
+# تاب 3: الأرشيف
+# ==================================================================================
+with tab3:
+    st.subheader("📁 سجل الأيام السابقة")
+
+    available_dates = sorted(all_data.keys(), reverse=True)
+    if not available_dates:
+        st.info("مفيش بيانات محفوظة لحد دلوقتي.")
+    else:
+        selected_date = st.selectbox("اختار يوم", available_dates)
+        day_data = all_data.get(selected_date, {})
+
+        rows = []
+        for driver in DRIVERS:
+            entry = day_data.get(driver, {})
+            rows.append({
+                "اسم المندوب": driver,
+                "عدد الطلبات": entry.get("count", 0),
+                "وقت التحديث": entry.get("time", "-")
+            })
+        df_archive = pd.DataFrame(rows)
+        st.dataframe(df_archive, use_container_width=True, hide_index=True)
+
+        # تصدير الأرشيف
+        output2 = BytesIO()
+        with pd.ExcelWriter(output2, engine="xlsxwriter") as writer:
+            df_archive.to_excel(writer, index=False, sheet_name=selected_date)
+        st.download_button(
+            label=f"⬇️ تحميل تقرير {selected_date}",
+            data=output2.getvalue(),
+            file_name=f"مناديب_{selected_date}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
