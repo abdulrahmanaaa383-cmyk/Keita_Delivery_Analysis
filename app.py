@@ -553,6 +553,7 @@ with tab2:
         st.markdown("---")
 
     for i, driver in enumerate(drivers_list):
+        safe_key = driver.replace(" ", "_").replace("/", "_")
         c_num, c_edit, c_del = st.columns([1, 5, 1])
         with c_num:
             st.markdown(
@@ -561,14 +562,14 @@ with tab2:
             )
         with c_edit:
             new_name = st.text_input(
-                f"driver_{i}",
+                f"driver_{safe_key}",
                 value=driver,
-                key=f"edit_{i}",
+                key=f"edit_{safe_key}",
                 label_visibility="collapsed"
             )
             drivers_list[i] = new_name
         with c_del:
-            if st.button("🗑️", key=f"del_{i}", help=f"حذف {driver}"):
+            if st.button("🗑️", key=f"del_{safe_key}", help=f"حذف {driver}"):
                 st.session_state["pending_delete"] = driver
                 st.rerun()
 
