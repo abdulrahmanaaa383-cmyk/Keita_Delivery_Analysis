@@ -31,7 +31,7 @@ DRIVERS_FILE   = "drivers.json"
 CONFIG_FILE    = "config.json"
 REPORTS_FILE   = "daily_reports.json"
 SHIFTS_FILE    = "shifts.json"
-LOCATIONS_FILE = "locations.json"   # ← مواقع المناديب اللايف
+LOCATIONS_FILE = "driver_locations.json"   # ← مواقع المناديب اللايف
 
 ADMIN_PASSWORD = "admin123"
 
@@ -75,8 +75,10 @@ def is_driver_online(driver_name, shifts_data):
     driver_shifts = shifts_data.get(driver_name, [])
     if not driver_shifts:
         return True, None
+
     now = now_saudi()
     current_minutes = now.hour * 60 + now.minute
+
     for shift in driver_shifts:
         start_str = shift.get("start", "")
         end_str   = shift.get("end", "")
@@ -110,12 +112,15 @@ def save_daily_report(day, data, drivers, shifts_data):
             "اسم المندوب":    driver,
             "عدد الطلبات":    count,
             "آخر تحديث":      entry.get("time", "-"),
-            "عدد التحديثات":  len(history),           # ← الجديد
-            "أوقات التحديثات": " | ".join(history) if history else "-"  # ← الجديد
+            "عدد التحديثات":  len(history),
+            "توقيتات التحديثات": " | ".join(history) if history else "-"
         })
     rows.append({
-        "اسم المندوب": "الإجمالي", "عدد الطلبات": total,
-        "آخر تحديث": "", "عدد التحديثات": "", "أوقات التحديثات": ""
+        "اسم المندوب": "الإجمالي",
+        "عدد الطلبات": total,
+        "آخر تحديث": "",
+        "عدد التحديثات": "",
+        "توقيتات التحديثات": ""
     })
     reports[day] = {
         "saved_at": now_saudi().strftime("%Y-%m-%d %H:%M"),
@@ -208,90 +213,61 @@ st.markdown("""
         background: #f1f3f5; border-radius: 8px; padding: 6px 10px;
         font-size: 0.8rem; color: #495057; border: 1px solid #dee2e6; margin-top: 4px;
     }
-    .loc-banner {
-        background: #e8f5e9; border: 1px solid #a5d6a7; border-radius: 10px;
-        padding: 10px 14px; font-size: 0.85rem; color: #2e7d32; margin: 8px 0;
+    /* PWA install banner */
+    .pwa-banner {
+        background: linear-gradient(135deg, #1D9E75, #159060);
+        color: white; padding: 14px 18px; border-radius: 12px;
+        text-align: center; margin: 1rem 0; font-weight: 700;
+        box-shadow: 0 4px 12px rgba(29,158,117,0.3);
     }
-    .loc-banner.warn {
-        background: #fff8e1; border-color: #ffe082; color: #f57f17;
-    }
+    .pwa-banner small { font-size: 0.8rem; opacity: 0.85; font-weight: 400; }
+    /* Map container */
+    .map-wrapper { border-radius: 12px; overflow: hidden; border: 2px solid #e9ecef; }
 </style>
 """, unsafe_allow_html=True)
 
 # ==================================================================================
-# JavaScript: تتبع الموقع (يُستخدم في صفحة المندوب)
+# ██  PWA — Service Worker + Manifest (يظهر في صفحة المندوب فقط)  ██
 # ==================================================================================
-LOCATION_JS = """
+PWA_SCRIPT = """
+<link rel="manifest" href="data:application/json;charset=utf-8,%7B%22name%22%3A%22%D8%B7%D9%84%D8%A8%D8%A7%D8%AA%D9%8A%20%D8%A7%D9%84%D9%8A%D9%88%D9%85%22%2C%22short_name%22%3A%22%D9%85%D9%86%D8%AF%D9%88%D8%A8%22%2C%22start_url%22%3A%22.%22%2C%22display%22%3A%22standalone%22%2C%22background_color%22%3A%22%23ffffff%22%2C%22theme_color%22%3A%221D9E75%22%2C%22icons%22%3A%5B%7B%22src%22%3A%22https%3A%2F%2Fcdn-icons-png.flaticon.com%2F512%2F2641%2F2641457.png%22%2C%22sizes%22%3A%22512x512%22%2C%22type%22%3A%22image%2Fpng%22%7D%5D%7D">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="مندوب">
+<link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/2641/2641457.png">
+<meta name="theme-color" content="#1D9E75">
 <script>
-// ========= إعدادات =========
-const DRIVER_NAME   = "{driver_name}";
-const UPDATE_URL    = "{base_url}?driver={token}&mode=location_update";
-const INTERVAL_MS   = 60000;   // 60 ثانية
-const SW_PATH       = "/app/static/sw.js";   // مش مستخدم هنا — fallback فقط
+// تسجيل Service Worker للـ PWA
+if ('serviceWorker' in navigator) {
+    const swCode = `
+        const CACHE_NAME = 'driver-app-v1';
+        self.addEventListener('install', e => self.skipWaiting());
+        self.addEventListener('activate', e => self.clients.claim());
+        self.addEventListener('fetch', e => {
+            e.respondWith(
+                fetch(e.request).catch(() => caches.match(e.request))
+            );
+        });
+    `;
+    const blob = new Blob([swCode], {type: 'application/javascript'});
+    const swUrl = URL.createObjectURL(blob);
+    navigator.serviceWorker.register(swUrl).catch(() => {});
+}
 
-// ========= إرسال الموقع =========
-function sendLocation(lat, lng, acc) {{
-    const payload = {{
-        driver: DRIVER_NAME,
-        lat: lat,
-        lng: lng,
-        acc: acc,
-        ts:  new Date().toISOString()
-    }};
-    // نرسل للـ Streamlit عن طريق localStorage كـ trigger
-    // (Streamlit مش بيدعم POST من JS مباشرة — بنستخدم حيلة الـ anchor)
-    const key = "loc_" + DRIVER_NAME.replace(/ /g,"_");
-    localStorage.setItem(key, JSON.stringify(payload));
-
-    // كمان نرسل لـ server-side endpoint (لو موجود)
-    fetch("{update_endpoint}", {{
-        method: "POST",
-        headers: {{"Content-Type": "application/json"}},
-        body: JSON.stringify(payload),
-        keepalive: true
-    }}).catch(()=>{{}});
-}}
-
-// ========= مراقبة الموقع =========
-if ("geolocation" in navigator) {{
-    const watchId = navigator.geolocation.watchPosition(
-        pos => sendLocation(
-            pos.coords.latitude,
-            pos.coords.longitude,
-            pos.coords.accuracy
-        ),
-        err => console.warn("GPS error:", err.message),
-        {{ enableHighAccuracy: true, maximumAge: 30000, timeout: 20000 }}
-    );
-
-    // احتفظ بالـ watchId في localStorage عشان ما يتوقفش
-    localStorage.setItem("gps_watch", watchId);
-}}
-
-// ========= Wake Lock (يمنع الشاشة من الإغلاق) =========
-async function keepAwake() {{
-    if ("wakeLock" in navigator) {{
-        try {{
-            await navigator.wakeLock.request("screen");
-            console.log("Wake lock active");
-        }} catch(e) {{
-            console.warn("Wake lock failed:", e);
-        }}
-    }}
-}}
-keepAwake();
-
-// ========= تحديث دوري كل دقيقة حتى لو مفيش حركة =========
-setInterval(() => {{
-    navigator.geolocation.getCurrentPosition(
-        pos => sendLocation(
-            pos.coords.latitude,
-            pos.coords.longitude,
-            pos.coords.accuracy
-        ),
-        err => {{}}
-    );
-}}, INTERVAL_MS);
+// زر Add to Home Screen
+let deferredPrompt;
+window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferredPrompt = e;
+    const btn = document.getElementById('pwa-install-btn');
+    if (btn) {
+        btn.style.display = 'block';
+        btn.addEventListener('click', () => {
+            deferredPrompt.prompt();
+            deferredPrompt.userChoice.then(() => { deferredPrompt = null; btn.style.display='none'; });
+        });
+    }
+});
 </script>
 """
 
@@ -342,107 +318,143 @@ if mode != "admin" and not driver_token:
     st.stop()
 
 # ==================================================================================
-# ██  صفحة المندوب الفردي  ██
+# ██  صفحة المندوب الفردي (مع GPS + PWA)  ██
 # ==================================================================================
 if current_driver:
-    online, shift_label = is_driver_online(current_driver, shifts_data)
-    base_url_cfg = config.get("base_url", "")
-    token_val    = get_driver_token(current_driver, today)
+    # حقن PWA في الصفحة
+    st.markdown(PWA_SCRIPT, unsafe_allow_html=True)
 
-    st.title(f"🚚 Hello, {current_driver}")
-    st.caption(f"📅 Today: {now_saudi().strftime('%A %d/%m/%Y')}")
+    online, shift_label = is_driver_online(current_driver, shifts_data)
+    st.title(f"🚚 مرحباً، {current_driver}")
+    st.caption(f"📅 {now_saudi().strftime('%A %d/%m/%Y')}")
 
     if not online:
-        st.warning("⏸️ You are currently **Offline** — outside your shift hours.")
+        st.warning("⏸️ أنت حالياً **خارج الدوام** — خارج ساعات الشيفت.")
         st.stop()
 
-    # ── إدراج JavaScript تتبع الموقع ──
-    update_endpoint = f"{base_url_cfg}?driver={token_val}&mode=location_update"
-    js_code = LOCATION_JS.format(
-        driver_name     = current_driver,
-        base_url        = base_url_cfg,
-        token           = token_val,
-        update_endpoint = update_endpoint
-    )
-    st.components.v1.html(js_code, height=0)
+    # ── بنر الإضافة لشاشة الهوم ──
+    st.markdown("""
+    <div class="pwa-banner">
+        📱 احفظ التطبيق على شاشتك الرئيسية وافتحه بسهولة كل يوم!<br>
+        <small>على الآيفون: اضغط مشاركة ← إضافة إلى الشاشة الرئيسية &nbsp;|&nbsp; أندرويد: القائمة ← تثبيت التطبيق</small>
+        <br><button id="pwa-install-btn" style="display:none; margin-top:8px; background:white; color:#1D9E75; border:none; padding:6px 18px; border-radius:20px; font-weight:700; cursor:pointer;">📲 تثبيت الآن</button>
+    </div>
+    """, unsafe_allow_html=True)
 
-    # ── تعليمات الموقع ──
-    loc_entry = locations_data.get(current_driver, {})
-    if loc_entry.get("lat"):
-        last_loc_time = loc_entry.get("ts", "")[:16].replace("T", " ")
-        st.markdown(f"""
-        <div class="loc-banner">
-            📍 موقعك وصل للمدير — آخر تحديث: {last_loc_time}
-            (lat: {round(loc_entry['lat'],4)}, lng: {round(loc_entry['lng'],4)})
-        </div>""", unsafe_allow_html=True)
-    else:
-        st.markdown("""
-        <div class="loc-banner warn">
-            📍 سيطلب التطبيق إذن الموقع — اضغط "السماح" عشان المدير يشوف مكانك على الخريطة
-        </div>""", unsafe_allow_html=True)
+    st.markdown("---")
 
-    # ── استقبال الموقع من localStorage عبر JS callback ──
-    # (Streamlit لا يدعم POST من JS مباشرة، فبنستخدم st.query_params كحل بديل)
-    raw_lat = query_params.get("lat", None)
-    raw_lng = query_params.get("lng", None)
-    if raw_lat and raw_lng:
+    # ── JavaScript: رفع الموقع كل 60 ثانية ──
+    base_url_for_gps = config.get("base_url", "")
+    gps_js = f"""
+    <script>
+    (function() {{
+        const DRIVER_NAME = "{current_driver}";
+        const TODAY       = "{today}";
+
+        function sendLocation(lat, lng, acc) {{
+            // نبعت الموقع عبر query param تحديث — Streamlit مش بيدعم POST من JS
+            // فبنستخدم Image beacon لـ silent GET request
+            const url = "{base_url_for_gps}?driver={driver_token}&lat=" + lat + "&lng=" + lng + "&acc=" + acc;
+            // نخزن في localStorage كـ fallback
+            const loc = {{lat, lng, acc, ts: new Date().toISOString()}};
+            localStorage.setItem('driver_location_{current_driver}', JSON.stringify(loc));
+
+            // نبعت fetch لنفس الصفحة بالإحداثيات (Streamlit هيتجاهلها لكن نكمل)
+            try {{
+                fetch(url, {{mode:'no-cors'}}).catch(()=>{{}});
+            }} catch(e) {{}}
+        }}
+
+        function watchLocation() {{
+            if (!navigator.geolocation) return;
+            navigator.geolocation.watchPosition(
+                pos => sendLocation(
+                    pos.coords.latitude.toFixed(6),
+                    pos.coords.longitude.toFixed(6),
+                    Math.round(pos.coords.accuracy)
+                ),
+                err => console.warn('GPS error:', err.message),
+                {{enableHighAccuracy: true, maximumAge: 30000, timeout: 15000}}
+            );
+        }}
+
+        // ابدأ فوراً
+        watchLocation();
+
+        // كل 60 ثانية اطلب تحديث
+        setInterval(() => {{
+            navigator.geolocation.getCurrentPosition(
+                pos => sendLocation(
+                    pos.coords.latitude.toFixed(6),
+                    pos.coords.longitude.toFixed(6),
+                    Math.round(pos.coords.accuracy)
+                ),
+                () => {{}}
+            );
+        }}, 60000);
+
+        // اعرض الحالة للمستخدم
+        navigator.geolocation.getCurrentPosition(
+            pos => {{
+                const el = document.getElementById('gps-status');
+                if (el) el.innerHTML = '📍 <b>تم تفعيل الموقع</b> — موقعك يُرسل تلقائياً للمدير كل دقيقة';
+                sendLocation(pos.coords.latitude.toFixed(6), pos.coords.longitude.toFixed(6), Math.round(pos.coords.accuracy));
+            }},
+            err => {{
+                const el = document.getElementById('gps-status');
+                if (el) el.innerHTML = '⚠️ لم يُسمح بالموقع — اسمح للمتصفح بالوصول إلى موقعك';
+            }},
+            {{enableHighAccuracy: true, timeout: 10000}}
+        );
+    }})();
+    </script>
+    <div id="gps-status" style="background:#f0fff8;border:1px solid #1D9E75;border-radius:8px;padding:8px 14px;font-size:0.85rem;color:#155724;margin:8px 0;">
+        ⏳ جاري تفعيل GPS...
+    </div>
+    """
+    st.markdown(gps_js, unsafe_allow_html=True)
+
+    # ── التحقق من إحداثيات مُمررة في URL (من JS) ──
+    lat_param = query_params.get("lat", None)
+    lng_param = query_params.get("lng", None)
+    if lat_param and lng_param:
         try:
-            loc_data = {
-                "lat": float(raw_lat),
-                "lng": float(raw_lng),
-                "ts":  now_saudi().isoformat()
+            locations_data[current_driver] = {
+                "lat":       float(lat_param),
+                "lng":       float(lng_param),
+                "acc":       query_params.get("acc", "?"),
+                "updated_at": now_saudi().strftime("%H:%M:%S")
             }
-            locations_data[current_driver] = loc_data
             save_json(LOCATIONS_FILE, locations_data)
         except:
             pass
 
-    st.markdown("---")
     prev_count = all_data[today].get(current_driver, {}).get("count", 0)
-    st.subheader("📦 Enter your number of orders for today.")
-    count = st.number_input("Number of Orders", min_value=0, max_value=999, value=prev_count, step=1, label_visibility="collapsed")
+    st.subheader("📦 أدخل عدد طلباتك لليوم")
+    count = st.number_input("عدد الطلبات", min_value=0, max_value=999, value=prev_count, step=1, label_visibility="collapsed")
 
-    if st.button("✅ Submit", use_container_width=True, type="primary"):
+    if st.button("✅ إرسال", use_container_width=True, type="primary"):
         now_time = now_saudi().strftime("%H:%M")
         entry    = all_data[today].get(current_driver, {"count": 0, "time": None, "history": []})
         history  = entry.get("history", [])
         history.append(now_time)
         all_data[today][current_driver] = {"count": count, "time": now_time, "history": history}
         save_json(DATA_FILE, all_data)
-        st.markdown('<div class="success-banner">✓ Submitted successfully! The manager can see your orders now.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="success-banner">✓ تم الإرسال! المدير شايف طلباتك دلوقتي.</div>', unsafe_allow_html=True)
 
     if prev_count > 0:
-        st.info(f"Last recorded value: **{prev_count}** orders")
+        st.info(f"آخر قيمة مسجلة: **{prev_count}** طلب")
 
     history_list = all_data[today].get(current_driver, {}).get("history", [])
     if history_list:
-        st.caption(f"🕐 Your updates today ({len(history_list)}): " + " · ".join(history_list))
-
-    # ── زر "شارك موقعك" بديل احتياطي ──
-    st.markdown("---")
-    st.markdown("#### 📍 مشاركة موقعك يدوياً (احتياطي)")
-    st.caption("اضغط الزر دا لو الموقع مش بيتبعت تلقائياً")
-    share_js = f"""
-    <button onclick="
-        navigator.geolocation.getCurrentPosition(function(p){{
-            window.location = '?driver={token_val}&lat='+p.coords.latitude+'&lng='+p.coords.longitude;
-        }}, function(){{ alert('تعذّر الحصول على موقعك — تأكد من إعطاء الإذن'); }},
-        {{enableHighAccuracy:true, timeout:10000}});
-    " style="
-        background:#1D9E75; color:white; border:none; border-radius:8px;
-        padding:10px 20px; font-size:1rem; font-family:Cairo,sans-serif;
-        cursor:pointer; width:100%;
-    ">📍 أرسل موقعي الآن</button>
-    """
-    st.components.v1.html(share_js, height=60)
-
+        st.caption(f"🕐 تحديثاتك اليوم ({len(history_list)}): " + " · ".join(history_list))
     st.stop()
 
 # ==================================================================================
 # ██  توكن غلط  ██
 # ==================================================================================
 if driver_token and not current_driver:
-    st.error("❌ This link is invalid or has expired. Please request a new link from the manager.")
+    st.error("❌ هذا الرابط غير صالح أو انتهت صلاحيته. اطلب رابطاً جديداً من المدير.")
     st.stop()
 
 # ==================================================================================
@@ -499,9 +511,12 @@ with col4: st.metric("🏆 الأعلى أداء", f"{top_driver.split()[0]} ({t
 st.markdown("---")
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "📋 الطلبات اليومية", "✏️ إدارة المناديب",
-    "🔗 روابط المناديب", "📁 الأرشيف",
-    "📊 التقارير اليومية", "🗺️ خريطة المناديب"
+    "📋 الطلبات اليومية",
+    "🗺️ خريطة المناديب",
+    "✏️ إدارة المناديب",
+    "🔗 روابط المناديب",
+    "📁 الأرشيف",
+    "📊 التقارير اليومية"
 ])
 
 # ==================================================================================
@@ -547,8 +562,11 @@ with tab1:
             badge      = '<span class="alert-badge badge-online">✓ Online</span>'
             status     = f"⏰ {time_str}" if time_str else "⚪ لم يُبلّغ بعد"
 
-        updates_count = len(history)
-        updates_info  = f"🔁 تحديثات اليوم: {updates_count}" if history else "🔁 لم يُحدّث بعد"
+        # تفاصيل التحديثات
+        updates_info = ""
+        if history:
+            updates_info = f"تحديثات ({len(history)}): " + " · ".join(history)
+
         color = "#1D9E75" if count > 0 and online else "#adb5bd"
 
         with cols[i % 3]:
@@ -573,11 +591,11 @@ with tab1:
             entry   = today_data.get(driver, {})
             history = entry.get("history", [])
             rows.append({
-                "اسم المندوب":    driver,
-                "عدد الطلبات":    entry.get("count", 0),
-                "آخر تحديث":      entry.get("time", "-"),
-                "عدد التحديثات":  len(history),
-                "أوقات التحديثات": " | ".join(history) if history else "-"
+                "اسم المندوب":         driver,
+                "عدد الطلبات":         entry.get("count", 0),
+                "آخر تحديث":           entry.get("time", "-"),
+                "عدد التحديثات":       len(history),
+                "توقيتات التحديثات":  " | ".join(history) if history else "-"
             })
         df_export = pd.DataFrame(rows)
         total_val = df_export["عدد الطلبات"].sum()
@@ -591,7 +609,7 @@ with tab1:
             hfmt = wb.add_format({'bold': True, 'bg_color': '#1D9E75', 'font_color': 'white', 'border': 1, 'align': 'center'})
             for cn, cv in enumerate(df_export.columns.values):
                 ws.write(0, cn, cv, hfmt)
-            ws.set_column(0, 0, 22); ws.set_column(1, 4, 18)
+            ws.set_column(0, 0, 22); ws.set_column(1, 5, 18)
 
         st.download_button(
             label="⬇️ تحميل تقرير Excel", data=output.getvalue(),
@@ -619,9 +637,203 @@ with tab1:
                 st.warning("اضغط مرة تانية للتأكيد")
 
 # ==================================================================================
-# تاب 2: إدارة المناديب + الشيفتات
+# تاب 2: خريطة المناديب اللايف
 # ==================================================================================
 with tab2:
+    st.subheader("🗺️ خريطة المناديب — Live")
+    st.caption("يتحدث كل دقيقة · الدوائر الخضراء = Online · الرمادية = Offline")
+
+    col_map_refresh, col_map_info = st.columns([1, 3])
+    with col_map_refresh:
+        if st.button("🔄 تحديث الخريطة", use_container_width=True):
+            st.rerun()
+    with col_map_info:
+        located = sum(1 for d in drivers_list if d in locations_data)
+        st.info(f"📍 {located} / {len(drivers_list)} مندوب شارك موقعه")
+
+    # بناء JSON لبيانات المناديب على الخريطة
+    map_drivers = []
+    for driver in drivers_list:
+        loc    = locations_data.get(driver, None)
+        online, _ = is_driver_online(driver, shifts_data)
+        entry  = today_data.get(driver, {})
+        count  = entry.get("count", 0)
+        updated = entry.get("time", None)
+
+        if loc:
+            map_drivers.append({
+                "name":    driver,
+                "lat":     loc["lat"],
+                "lng":     loc["lng"],
+                "online":  online,
+                "count":   count,
+                "updated": updated or "لم يُبلّغ",
+                "gps_time": loc.get("updated_at", ""),
+                "acc":     loc.get("acc", "?")
+            })
+        else:
+            map_drivers.append({
+                "name":    driver,
+                "lat":     None,
+                "lng":     None,
+                "online":  online,
+                "count":   count,
+                "updated": updated or "لم يُبلّغ",
+                "gps_time": None,
+                "acc":     None
+            })
+
+    map_json = json.dumps(map_drivers, ensure_ascii=False)
+
+    # خريطة Leaflet.js
+    map_html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  body {{ margin:0; padding:0; font-family: 'Cairo', sans-serif; }}
+  #map {{ width:100%; height:520px; }}
+  .driver-popup {{ min-width:160px; text-align:right; direction:rtl; }}
+  .driver-popup h4 {{ margin:0 0 6px; color:#1D9E75; font-size:1rem; }}
+  .driver-popup p  {{ margin:2px 0; font-size:0.82rem; color:#555; }}
+  .badge-on  {{ background:#1D9E75; color:white; padding:2px 8px; border-radius:10px; font-size:0.75rem; }}
+  .badge-off {{ background:#6c757d; color:white; padding:2px 8px; border-radius:10px; font-size:0.75rem; }}
+  .no-loc-list {{ padding:12px; background:#f8f9fa; border-radius:8px; margin-top:10px; }}
+  .no-loc-list h5 {{ margin:0 0 6px; color:#6c757d; }}
+  .no-loc-list li {{ font-size:0.85rem; color:#888; list-style:disc; margin-right:18px; }}
+  #legend {{
+    position:absolute; bottom:24px; right:12px; z-index:1000;
+    background:white; padding:10px 14px; border-radius:10px;
+    box-shadow:0 2px 8px rgba(0,0,0,0.15); font-size:0.8rem; direction:rtl;
+  }}
+  #legend div {{ display:flex; align-items:center; gap:6px; margin-bottom:4px; }}
+  .dot {{ width:12px; height:12px; border-radius:50%; display:inline-block; }}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="legend">
+  <div><span class="dot" style="background:#1D9E75;"></span> Online</div>
+  <div><span class="dot" style="background:#6c757d;"></span> Offline</div>
+  <div><span class="dot" style="background:#dc3545; border:2px solid #a00;"></span> لم يُبلّغ</div>
+</div>
+
+<script>
+const driversData = {map_json};
+
+// تجميع المناديب عندهم موقع
+const withLoc    = driversData.filter(d => d.lat !== null);
+const withoutLoc = driversData.filter(d => d.lat === null);
+
+// مركز الخريطة
+let centerLat = 24.7136, centerLng = 46.6753; // الرياض افتراضي
+if (withLoc.length > 0) {{
+    centerLat = withLoc.reduce((s,d)=>s+d.lat,0) / withLoc.length;
+    centerLng = withLoc.reduce((s,d)=>s+d.lng,0) / withLoc.length;
+}}
+
+const map = L.map('map').setView([centerLat, centerLng], withLoc.length > 0 ? 12 : 6);
+
+L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+    attribution: '© OpenStreetMap',
+    maxZoom: 19
+}}).addTo(map);
+
+// دوائر المناديب
+withLoc.forEach(d => {{
+    const color  = d.online ? '#1D9E75' : '#6c757d';
+    const border = d.updated === 'لم يُبلّغ' ? '#dc3545' : color;
+
+    const circle = L.circleMarker([d.lat, d.lng], {{
+        radius: 18,
+        fillColor: color,
+        color: border,
+        weight: d.updated === 'لم يُبلّغ' ? 3 : 2,
+        opacity: 1,
+        fillOpacity: 0.85
+    }}).addTo(map);
+
+    // اسم مختصر داخل الدائرة
+    const shortName = d.name.split(' ')[0];
+    const label = L.divIcon({{
+        className: '',
+        html: `<div style="color:white;font-weight:700;font-size:0.72rem;text-align:center;pointer-events:none;white-space:nowrap;">${{shortName}}</div>`,
+        iconAnchor: [0, -8]
+    }});
+    L.marker([d.lat, d.lng], {{icon: label, interactive: false}}).addTo(map);
+
+    const badge = d.online
+        ? '<span class="badge-on">Online</span>'
+        : '<span class="badge-off">Offline</span>';
+
+    const gpsInfo = d.gps_time ? `<p>📡 GPS: ${{d.gps_time}} (±${{d.acc}}م)</p>` : '';
+
+    circle.bindPopup(`
+        <div class="driver-popup">
+            <h4>🚚 ${{d.name}}</h4>
+            <p>${{badge}}</p>
+            <p>📦 طلبات: <b>${{d.count}}</b></p>
+            <p>🕐 آخر تبليغ: ${{d.updated}}</p>
+            ${{gpsInfo}}
+        </div>
+    `);
+}});
+
+// تلقائي: ضبط الخريطة على كل المناديب
+if (withLoc.length > 1) {{
+    const bounds = L.latLngBounds(withLoc.map(d => [d.lat, d.lng]));
+    map.fitBounds(bounds, {{padding: [40, 40]}});
+}}
+
+// تحديث تلقائي كل 60 ثانية
+setTimeout(() => location.reload(), 60000);
+</script>
+
+<!-- قائمة بدون موقع -->
+<div id="no-loc" style="display:${{withoutLoc.length>0?'block':'none'}};padding:8px 12px;">
+</div>
+<script>
+if (withoutLoc.length > 0) {{
+    const div = document.getElementById('no-loc');
+    div.innerHTML = `
+        <div class="no-loc-list">
+            <h5>⚠️ المناديب التالية لم تفعّل GPS بعد (${{withoutLoc.length}}):</h5>
+            <ul>${{withoutLoc.map(d=>`<li>${{d.name}}</li>`).join('')}}</ul>
+        </div>
+    `;
+}}
+</script>
+</body>
+</html>
+"""
+    st.components.v1.html(map_html, height=600, scrolling=False)
+
+    # ── جدول مواقع المناديب ──
+    if locations_data:
+        st.markdown("### 📍 آخر موقع مسجل لكل مندوب")
+        loc_rows = []
+        for driver in drivers_list:
+            loc = locations_data.get(driver, None)
+            if loc:
+                loc_rows.append({
+                    "المندوب":     driver,
+                    "خط العرض":   loc.get("lat", "-"),
+                    "خط الطول":   loc.get("lng", "-"),
+                    "دقة (م)":    loc.get("acc", "-"),
+                    "آخر تحديث":  loc.get("updated_at", "-")
+                })
+        if loc_rows:
+            st.dataframe(pd.DataFrame(loc_rows), use_container_width=True, hide_index=True)
+
+
+# ==================================================================================
+# تاب 3: إدارة المناديب + الشيفتات
+# ==================================================================================
+with tab3:
     st.markdown("### ➕ إضافة مناديب جدد")
     st.info("اكتب كل اسم في سطر منفصل ثم اضغط إضافة")
     new_names_input = st.text_area("أسماء جديدة", placeholder="محمد إبراهيم\nعلي حسن", height=120, label_visibility="collapsed")
@@ -638,6 +850,7 @@ with tab2:
 
     st.markdown("---")
     st.markdown("### ✏️ تعديل / حذف / شيفتات المناديب")
+    st.caption("اضغط على اسم المندوب لتعديل شيفتاته — أو اضغط 🗑️ لحذفه")
 
     if st.session_state.get("pending_delete"):
         driver_to_del = st.session_state["pending_delete"]
@@ -677,7 +890,7 @@ with tab2:
                     st.session_state["pending_delete"] = driver
                     st.rerun()
 
-            st.markdown("**⏰ الشيفتات:**")
+            st.markdown("**⏰ الشيفتات (حتى 3 شيفتات):**")
             updated_shifts = []
             for si in range(3):
                 shift = driver_shifts[si] if si < len(driver_shifts) else {"start": "", "end": ""}
@@ -709,9 +922,9 @@ with tab2:
         st.success("✅ تم الحفظ!")
 
 # ==================================================================================
-# تاب 3: روابط المناديب
+# تاب 4: روابط المناديب
 # ==================================================================================
-with tab3:
+with tab4:
     st.info("⚠️ الروابط دي بتتغير كل يوم تلقائياً — ابعتها للمناديب كل صباح على واتساب.")
     saved_url = config.get("base_url", "https://keitadeliveryanalysis-6zvs3tjytsugs3yweiq2s6.streamlit.app")
     base_url  = st.text_input("🌐 رابط الموقع الأساسي", value=saved_url)
@@ -735,12 +948,13 @@ with tab3:
     for driver in drivers_list:
         token   = get_driver_token(driver, today)
         wa_msg += f"▫️ {driver}: {base_url}?driver={token}\n"
-    st.text_area("رسالة واتساب", wa_msg, height=280)
+    wa_msg += "\n💡 افتح الرابط واضغط 'إضافة للشاشة الرئيسية' عشان تلاقيه بسرعة كل يوم"
+    st.text_area("رسالة واتساب", wa_msg, height=300)
 
 # ==================================================================================
-# تاب 4: الأرشيف
+# تاب 5: الأرشيف
 # ==================================================================================
-with tab4:
+with tab5:
     st.subheader("📁 سجل الأيام السابقة")
     available_dates = sorted(all_data.keys(), reverse=True)
     if not available_dates:
@@ -753,11 +967,11 @@ with tab4:
             entry   = day_data.get(driver, {})
             history = entry.get("history", [])
             rows.append({
-                "اسم المندوب":    driver,
-                "عدد الطلبات":    entry.get("count", 0),
-                "وقت التحديث":    entry.get("time", "-"),
-                "عدد التحديثات":  len(history),
-                "أوقات التحديثات": " | ".join(history) if history else "-"
+                "اسم المندوب":        driver,
+                "عدد الطلبات":        entry.get("count", 0),
+                "وقت آخر تحديث":      entry.get("time", "-"),
+                "عدد التحديثات":      len(history),
+                "توقيتات التحديثات": " | ".join(history) if history else "-"
             })
         df_archive = pd.DataFrame(rows)
         st.dataframe(df_archive, use_container_width=True, hide_index=True)
@@ -765,6 +979,12 @@ with tab4:
         output2 = BytesIO()
         with pd.ExcelWriter(output2, engine="xlsxwriter") as writer:
             df_archive.to_excel(writer, index=False, sheet_name=selected_date)
+            wb   = writer.book
+            ws   = writer.sheets[selected_date]
+            hfmt = wb.add_format({'bold': True, 'bg_color': '#1D9E75', 'font_color': 'white', 'border': 1, 'align': 'center'})
+            for cn, cv in enumerate(df_archive.columns.values):
+                ws.write(0, cn, cv, hfmt)
+            ws.set_column(0, 0, 22); ws.set_column(1, 5, 18)
         st.download_button(
             label=f"⬇️ تحميل تقرير {selected_date}", data=output2.getvalue(),
             file_name=f"مناديب_{selected_date}.xlsx",
@@ -772,9 +992,9 @@ with tab4:
         )
 
 # ==================================================================================
-# تاب 5: التقارير اليومية المحفوظة
+# تاب 6: التقارير اليومية المحفوظة
 # ==================================================================================
-with tab5:
+with tab6:
     st.subheader("📊 التقارير اليومية المحفوظة")
     st.caption("بتتحفظ تلقائياً كل يوم — أو يدوياً من تاب الطلبات")
 
@@ -805,20 +1025,22 @@ with tab5:
 
         if rep_rows:
             df_rep = pd.DataFrame(rep_rows)
-            # ── عرض عدد التحديثات وأوقاتها بشكل بارز ──
+            # عرض عمود التوقيتات بشكل واضح
             st.dataframe(df_rep, use_container_width=True, hide_index=True)
 
-            # ── ملخص التحديثات لكل مندوب ──
-            st.markdown("#### 🔁 تفاصيل التحديثات")
-            for row in rep_rows:
-                if row.get("اسم المندوب") == "الإجمالي":
-                    continue
-                n_updates = row.get("عدد التحديثات", 0)
-                times_str = row.get("أوقات التحديثات", "-")
-                if n_updates and int(str(n_updates)) > 0:
-                    st.markdown(f"**{row['اسم المندوب']}** — {n_updates} تحديث: `{times_str}`")
-                else:
-                    st.markdown(f"**{row['اسم المندوب']}** — لم يُحدّث")
+            # إحصائيات التحديثات
+            data_rows = [r for r in rep_rows if r.get("اسم المندوب") != "الإجمالي"]
+            if data_rows:
+                st.markdown("### 📈 إحصائيات التحديثات")
+                stats_cols = st.columns(3)
+                total_updates = sum(int(r.get("عدد التحديثات", 0)) for r in data_rows if str(r.get("عدد التحديثات","")).isdigit())
+                max_updates_row = max(data_rows, key=lambda r: int(r.get("عدد التحديثات", 0)) if str(r.get("عدد التحديثات","")).isdigit() else 0)
+                with stats_cols[0]:
+                    st.metric("مجموع كل التحديثات", total_updates)
+                with stats_cols[1]:
+                    st.metric("أكثر مندوب تحديثاً", max_updates_row.get("اسم المندوب", "-"))
+                with stats_cols[2]:
+                    st.metric("عدد تحديثاته", max_updates_row.get("عدد التحديثات", 0))
 
             out_rep = BytesIO()
             with pd.ExcelWriter(out_rep, engine="xlsxwriter") as writer:
@@ -848,124 +1070,6 @@ with tab5:
             else:
                 st.session_state["confirm_del_report"] = True
                 st.warning("اضغط مرة تانية للتأكيد")
-
-# ==================================================================================
-# تاب 6: خريطة المناديب اللايف  🗺️
-# ==================================================================================
-with tab6:
-    st.subheader("🗺️ خريطة المناديب — مواقع لايف")
-    st.caption("بيتحدث كل مرة المندوب يفتح الرابط أو يضغط 'أرسل موقعي'")
-
-    col_map_refresh, col_map_info = st.columns([1, 3])
-    with col_map_refresh:
-        if st.button("🔄 تحديث الخريطة", use_container_width=True):
-            locations_data = load_json(LOCATIONS_FILE, {})
-            st.rerun()
-    with col_map_info:
-        active_locs = sum(1 for d in drivers_list if locations_data.get(d, {}).get("lat"))
-        st.info(f"📍 {active_locs} من {len(drivers_list)} مناديب مواقعهم ظاهرة")
-
-    # ── بناء بيانات الخريطة ──
-    map_drivers = []
-    for driver in drivers_list:
-        loc = locations_data.get(driver, {})
-        if loc.get("lat") and loc.get("lng"):
-            online, _ = is_driver_online(driver, shifts_data)
-            orders    = today_data.get(driver, {}).get("count", 0)
-            updates   = len(today_data.get(driver, {}).get("history", []))
-            last_ts   = loc.get("ts", "")[:16].replace("T", " ")
-            map_drivers.append({
-                "name":    driver,
-                "lat":     loc["lat"],
-                "lng":     loc["lng"],
-                "online":  online,
-                "orders":  orders,
-                "updates": updates,
-                "ts":      last_ts,
-            })
-
-    if not map_drivers:
-        st.warning("⚠️ مفيش مناديب شاركوا موقعهم لحد دلوقتي.\n\nالمناديب لازم يفتحوا الرابط بتاعهم ويسمحوا للتطبيق ياخد موقعهم.")
-    else:
-        # ── خريطة Leaflet عبر HTML ──
-        markers_js = ""
-        for d in map_drivers:
-            color = "#1D9E75" if d["online"] else "#adb5bd"
-            popup = f"{d['name']}<br>📦 {d['orders']} طلب | 🔁 {d['updates']} تحديث<br>🕐 {d['ts']}"
-            markers_js += f"""
-            L.circleMarker([{d['lat']}, {d['lng']}], {{
-                radius: 14, color: '{color}', fillColor: '{color}',
-                fillOpacity: 0.85, weight: 3
-            }}).addTo(map)
-            .bindPopup(`{popup}`)
-            .bindTooltip(`{d['name']}`, {{permanent: true, direction: 'top', offset: [0, -14],
-                className: 'driver-tooltip'}});
-            """
-
-        center_lat = sum(d["lat"] for d in map_drivers) / len(map_drivers)
-        center_lng = sum(d["lng"] for d in map_drivers) / len(map_drivers)
-
-        map_html = f"""
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-<style>
-  body {{ margin:0; padding:0; }}
-  #map {{ height: 480px; width: 100%; border-radius: 12px; }}
-  .driver-tooltip {{
-    background: white; border: 2px solid #1D9E75; border-radius: 6px;
-    font-family: Cairo, sans-serif; font-weight: 700; font-size: 12px;
-    color: #1D9E75; padding: 2px 6px; white-space: nowrap;
-  }}
-  .leaflet-popup-content {{ font-family: Cairo, sans-serif; font-size: 13px;
-    direction: rtl; text-align: right; }}
-</style>
-</head>
-<body>
-<div id="map"></div>
-<script>
-var map = L.map('map').setView([{center_lat}, {center_lng}], 12);
-L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-    attribution: '© OpenStreetMap', maxZoom: 19
-}}).addTo(map);
-{markers_js}
-</script>
-</body>
-</html>
-"""
-        st.components.v1.html(map_html, height=500)
-
-        # ── جدول المواقع ──
-        st.markdown("#### 📋 تفاصيل المواقع")
-        loc_rows = []
-        for d in map_drivers:
-            loc_rows.append({
-                "المندوب":     d["name"],
-                "الحالة":      "🟢 Online" if d["online"] else "⚫ Offline",
-                "الطلبات":     d["orders"],
-                "التحديثات":   d["updates"],
-                "آخر موقع":    d["ts"],
-                "lat":         round(d["lat"], 5),
-                "lng":         round(d["lng"], 5),
-            })
-        st.dataframe(pd.DataFrame(loc_rows), use_container_width=True, hide_index=True)
-
-    # ── معلومات للمدير عن آلية التتبع ──
-    with st.expander("ℹ️ كيف يشتغل التتبع؟"):
-        st.markdown("""
-**الآلية:**
-- لما المندوب يفتح الرابط بتاعه، التطبيق بيطلب إذن الموقع
-- لو وافق، الموقع بيتبعت تلقائياً كل دقيقة طول ما الصفحة مفتوحة
-- لو أغلق المتصفح، التتبع بيوقف (ده قيد من المتصفح نفسه)
-- عنده زر "أرسل موقعي الآن" لو حاب يبعت يدوياً
-
-**نصيحة:**
-- قول للمناديب يفتحوا الرابط في أول الشيفت ويخلوا التبويب مفتوح
-- على Android: في Chrome، ممكن يضيف الموقع للشاشة الرئيسية كـ PWA يشتغل في الخلفية
-        """)
 
 st.markdown("---")
 if st.button("🚪 تسجيل خروج"):
