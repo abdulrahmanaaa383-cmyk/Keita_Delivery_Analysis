@@ -355,33 +355,38 @@ if current_driver:
 
     st.subheader("📦 Enter your number of orders for today.")
     count = st.number_input("Number of Orders", min_value=0, max_value=999, value=prev_count, step=1, label_visibility="collapsed")
-# ── JavaScript لطلب الموقع وإرساله ──
-loc_component = st.empty()
-loc_component.markdown("""
-<div id="loc_status" style="font-size:0.8rem;color:#6c757d;margin-bottom:8px;">📍 Getting your location...</div>
-<input type="hidden" id="driver_lat" value="">
-<input type="hidden" id="driver_lng" value="">
-<script>
-function sendLocation() {
-    if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(function(pos) {
-            document.getElementById('driver_lat').value = pos.coords.latitude;
-            document.getElementById('driver_lng').value = pos.coords.longitude;
-            document.getElementById('loc_status').innerHTML =
-                '📍 Location: ' + pos.coords.latitude.toFixed(4) + ', ' + pos.coords.longitude.toFixed(4);
-            // حفظ في sessionStorage عشان Streamlit يقراها
-            sessionStorage.setItem('driver_lat', pos.coords.latitude);
-            sessionStorage.setItem('driver_lng', pos.coords.longitude);
-        }, function(err) {
-            document.getElementById('loc_status').innerHTML = '⚠️ Location not available';
-        });
+
+    # ── JavaScript لطلب الموقع وإرساله ──
+    loc_component = st.empty()
+    loc_component.markdown("""
+    <div id="loc_status" style="font-size:0.8rem;color:#6c757d;margin-bottom:8px;">📍 Getting your location...</div>
+    <input type="hidden" id="driver_lat" value="">
+    <input type="hidden" id="driver_lng" value="">
+    <script>
+    function sendLocation() {
+        if (navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition(function(pos) {
+                document.getElementById('driver_lat').value = pos.coords.latitude;
+                document.getElementById('driver_lng').value = pos.coords.longitude;
+                document.getElementById('loc_status').innerHTML =
+                    '📍 Location: ' + pos.coords.latitude.toFixed(4) + ', ' + pos.coords.longitude.toFixed(4);
+                // حفظ في sessionStorage عشان Streamlit يقراها
+                sessionStorage.setItem('driver_lat', pos.coords.latitude);
+                sessionStorage.setItem('driver_lng', pos.coords.longitude);
+            }, function(err) {
+                document.getElementById('loc_status').innerHTML = '⚠️ Location not available';
+            });
+        }
     }
-}
-sendLocation();
-// تحديث كل دقيقة
-setInterval(sendLocation, 60000);
-</script>
-""", unsafe_allow_html=True)
+    sendLocation();
+    // تحديث كل دقيقة
+    setInterval(sendLocation, 60000);
+    </script>
+    """, unsafe_allow_html=True)
+
+    # ── الموقع المحفوظ من آخر submit ──
+    prev_lat = prev_entry.get("lat")
+    prev_lng = prev_entry.get("lng")
     if prev_lat and prev_lng:
         st.caption(f"📍 Last known location: {float(prev_lat):.4f}, {float(prev_lng):.4f}")
 
