@@ -30,7 +30,7 @@ DATA_FILE    = "delivery_data.json"
 DRIVERS_FILE = "drivers.json"
 CONFIG_FILE  = "config.json"
 REPORTS_FILE = "daily_reports.json"
-SHIFTS_FILE  = "shifts.json"          # ← شيفتات كل مندوب
+SHIFTS_FILE  = "shifts.json"
 
 ADMIN_PASSWORD = "admin123"
 
@@ -71,17 +71,11 @@ def minutes_since_update(time_str):
         return None
 
 def is_driver_online(driver_name, shifts_data):
-    """
-    هل المندوب دلوقتي في شيفت؟
-    لو مفيش شيفتات محددة → يعتبر Online دايماً
-    """
     driver_shifts = shifts_data.get(driver_name, [])
     if not driver_shifts:
-        return True, None   # مفيش شيفت محدد = Online دايماً
-
+        return True, None
     now = now_saudi()
     current_minutes = now.hour * 60 + now.minute
-
     for shift in driver_shifts:
         start_str = shift.get("start", "")
         end_str   = shift.get("end", "")
@@ -92,7 +86,6 @@ def is_driver_online(driver_name, shifts_data):
             eh, em = map(int, end_str.split(":"))
             start_m = sh * 60 + sm
             end_m   = eh * 60 + em
-            # دعم الشيفت اللي يعدي منتصف الليل
             if start_m <= end_m:
                 if start_m <= current_minutes <= end_m:
                     return True, f"{start_str} - {end_str}"
@@ -103,25 +96,103 @@ def is_driver_online(driver_name, shifts_data):
             continue
     return False, None
 
+def calc_idle_periods(location_history, idle_threshold_minutes=30):
+    """
+    يحسب الفترات اللي المندوب فيها مستني في مكان واحد
+    location_history = [{"lat":..., "lng":..., "time":"HH:MM", "ts": unix_timestamp}, ...]
+    """
+    if len(location_history) < 2:
+        return []
+    idle_periods = []
+    idle_start   = None
+    idle_start_time = None
+
+    for i in range(1, len(location_history)):
+        prev = location_history[i - 1]
+        curr = location_history[i]
+        try:
+            dlat = abs(float(curr["lat"]) - float(prev["lat"]))
+            dlng = abs(float(curr["lng"]) - float(prev["lng"]))
+            moved = (dlat > 0.0005 or dlng > 0.0005)  # ~50 متر تقريباً
+        except:
+            moved = True
+
+        if not moved:
+            if idle_start is None:
+                idle_start      = i - 1
+                idle_start_time = prev.get("time", "")
+        else:
+            if idle_start is not None:
+                idle_end_time = prev.get("time", "")
+                # احسب الدقايق
+                try:
+                    sh, sm = map(int, idle_start_time.split(":"))
+                    eh, em = map(int, idle_end_time.split(":"))
+                    diff_m = (eh * 60 + em) - (sh * 60 + sm)
+                except:
+                    diff_m = 0
+                if diff_m >= idle_threshold_minutes:
+                    idle_periods.append({
+                        "from": idle_start_time,
+                        "to":   idle_end_time,
+                        "minutes": diff_m,
+                        "lat": location_history[idle_start]["lat"],
+                        "lng": location_history[idle_start]["lng"],
+                    })
+                idle_start = None
+
+    # لو لسه مستني لحد دلوقتي
+    if idle_start is not None:
+        idle_end_time = location_history[-1].get("time", "")
+        try:
+            sh, sm = map(int, idle_start_time.split(":"))
+            eh, em = map(int, idle_end_time.split(":"))
+            diff_m = (eh * 60 + em) - (sh * 60 + sm)
+        except:
+            diff_m = 0
+        if diff_m >= idle_threshold_minutes:
+            idle_periods.append({
+                "from": idle_start_time,
+                "to":   idle_end_time,
+                "minutes": diff_m,
+                "lat": location_history[idle_start]["lat"],
+                "lng": location_history[idle_start]["lng"],
+                "still_idle": True
+            })
+    return idle_periods
+
 def save_daily_report(day, data, drivers, shifts_data):
     reports = load_json(REPORTS_FILE, {})
     rows  = []
     total = 0
     for driver in drivers:
-        entry   = data.get(driver, {})
-        count   = entry.get("count", 0)
-        history = entry.get("history", [])
-        total  += count
+        entry    = data.get(driver, {})
+        count    = entry.get("count", 0)
+        history  = entry.get("history", [])
+        loc_hist = entry.get("location_history", [])
+        total   += count
+        idle_periods = calc_idle_periods(loc_hist)
+        idle_summary = ""
+        if idle_periods:
+            parts = []
+            for p in idle_periods:
+                label = f"{p['from']} → {p['to']} ({p['minutes']} د)"
+                if p.get("still_idle"):
+                    label += " ⚠️ لسه واقف"
+                parts.append(label)
+            idle_summary = " | ".join(parts)
+
         rows.append({
-            "اسم المندوب":  driver,
-            "عدد الطلبات":  count,
-            "آخر تحديث":    entry.get("time", "-"),
-            "عدد التحديثات": len(history),
-            "سجل التحديثات": " | ".join(history) if history else "-"
+            "اسم المندوب":    driver,
+            "عدد الطلبات":    count,
+            "آخر تحديث":      entry.get("time", "-"),
+            "عدد التحديثات":  len(history),
+            "سجل التحديثات":  " | ".join(history) if history else "-",
+            "فترات التوقف":   idle_summary if idle_summary else "لا يوجد",
         })
     rows.append({
         "اسم المندوب": "الإجمالي", "عدد الطلبات": total,
-        "آخر تحديث": "", "عدد التحديثات": "", "سجل التحديثات": ""
+        "آخر تحديث": "", "عدد التحديثات": "", "سجل التحديثات": "", "فترات التوقف": ""
     })
     reports[day] = {
         "saved_at": now_saudi().strftime("%Y-%m-%d %H:%M"),
@@ -144,7 +215,6 @@ today       = get_today()
 if today not in all_data:
     all_data[today] = {}
 
-# حفظ تقرير أمس تلقائياً
 reports   = load_json(REPORTS_FILE, {})
 yesterday = (now_saudi() - timedelta(days=1)).strftime("%Y-%m-%d")
 if yesterday in all_data and yesterday not in reports:
@@ -189,6 +259,7 @@ st.markdown("""
     .badge-warning  { background: #ffc107; color: #333; }
     .badge-offline  { background: #6c757d; color: white; }
     .badge-online   { background: #1D9E75; color: white; }
+    .badge-idle     { background: #fd7e14; color: white; }
     .link-box {
         background: #f1f3f5; border-radius: 8px; padding: 8px 12px;
         font-family: monospace; font-size: 0.8rem; word-break: break-all;
@@ -237,26 +308,29 @@ if mode != "admin" and not driver_token:
         last_time = all_data[today].get(driver, {}).get("time", None)
         col1, col2, col3 = st.columns([3, 2, 2])
         with col1:
-            st.markdown(f"<div style='padding:10px 4px; font-weight:600; font-size:1rem;'>{driver}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div style='padding:10px 4px;font-weight:600;font-size:1rem;'>{driver}</div>", unsafe_allow_html=True)
         with col2:
             inputs[driver] = st.number_input(label=driver, min_value=0, max_value=999, value=prev, step=1, key=f"inp_{driver}", label_visibility="collapsed")
         with col3:
-            if last_time:
-                st.success(f"✓ {last_time}")
-            else:
-                st.caption("—")
+            if last_time: st.success(f"✓ {last_time}")
+            else: st.caption("—")
 
     st.markdown("---")
     if st.button("💾 Save All", type="primary", use_container_width=True):
         now_time = now_saudi().strftime("%H:%M")
         for driver, count in inputs.items():
             if count > 0 or driver in all_data[today]:
-                entry = all_data[today].get(driver, {"count": 0, "time": None, "history": []})
+                entry   = all_data[today].get(driver, {"count": 0, "time": None, "history": [], "location_history": []})
                 history = entry.get("history", [])
                 history.append(now_time)
-                all_data[today][driver] = {"count": count, "time": now_time, "history": history}
+                all_data[today][driver] = {
+                    "count": count, "time": now_time,
+                    "history": history,
+                    "location_history": entry.get("location_history", []),
+                    "lat": entry.get("lat"), "lng": entry.get("lng")
+                }
         save_json(DATA_FILE, all_data)
-        st.success("✅ Saved successfully! The manager can now see the data.")
+        st.success("✅ Saved successfully!")
         st.rerun()
 
     st.markdown("---")
@@ -276,23 +350,79 @@ if current_driver:
         st.stop()
 
     st.markdown("---")
-    prev_count = all_data[today].get(current_driver, {}).get("count", 0)
+    prev_entry = all_data[today].get(current_driver, {})
+    prev_count = prev_entry.get("count", 0)
+
     st.subheader("📦 Enter your number of orders for today.")
     count = st.number_input("Number of Orders", min_value=0, max_value=999, value=prev_count, step=1, label_visibility="collapsed")
 
+    # ── JavaScript لطلب الموقع وإرساله ──
+    loc_component = st.empty()
+    loc_component.markdown("""
+    <div id="loc_status" style="font-size:0.8rem;color:#6c757d;margin-bottom:8px;">📍 Getting your location...</div>
+    <input type="hidden" id="driver_lat" value="">
+    <input type="hidden" id="driver_lng" value="">
+    <script>
+    function sendLocation() {
+        if (navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition(function(pos) {
+                document.getElementById('driver_lat').value = pos.coords.latitude;
+                document.getElementById('driver_lng').value = pos.coords.longitude;
+                document.getElementById('loc_status').innerHTML =
+                    '📍 Location: ' + pos.coords.latitude.toFixed(4) + ', ' + pos.coords.longitude.toFixed(4);
+                // حفظ في sessionStorage عشان Streamlit يقراها
+                sessionStorage.setItem('driver_lat', pos.coords.latitude);
+                sessionStorage.setItem('driver_lng', pos.coords.longitude);
+            }, function(err) {
+                document.getElementById('loc_status').innerHTML = '⚠️ Location not available';
+            });
+        }
+    }
+    sendLocation();
+    // تحديث كل دقيقة
+    setInterval(sendLocation, 60000);
+    </script>
+    """, unsafe_allow_html=True)
+
+    # ── الموقع المحفوظ من آخر submit ──
+    prev_lat = prev_entry.get("lat")
+    prev_lng = prev_entry.get("lng")
+    if prev_lat and prev_lng:
+        st.caption(f"📍 Last known location: {float(prev_lat):.4f}, {float(prev_lng):.4f}")
+
+    # ── خانات مخفية للموقع (المستخدم يكتبها لو مش اشتغل الـ JS) ──
+    with st.expander("📍 Share your location manually (if auto failed)", expanded=False):
+        manual_lat = st.text_input("Latitude",  placeholder="e.g. 24.7136", key="m_lat")
+        manual_lng = st.text_input("Longitude", placeholder="e.g. 46.6753", key="m_lng")
+
     if st.button("✅ Submit", use_container_width=True, type="primary"):
         now_time = now_saudi().strftime("%H:%M")
-        entry    = all_data[today].get(current_driver, {"count": 0, "time": None, "history": []})
+        entry    = all_data[today].get(current_driver, {"count": 0, "time": None, "history": [], "location_history": []})
         history  = entry.get("history", [])
         history.append(now_time)
-        all_data[today][current_driver] = {"count": count, "time": now_time, "history": history}
+
+        # الموقع: أولاً اليدوي، وإلا الأخير المحفوظ
+        lat = manual_lat.strip() if manual_lat.strip() else prev_lat
+        lng = manual_lng.strip() if manual_lng.strip() else prev_lng
+
+        loc_history = entry.get("location_history", [])
+        if lat and lng:
+            loc_history.append({"lat": lat, "lng": lng, "time": now_time})
+            # نحتفظ بآخر 100 نقطة بس
+            loc_history = loc_history[-100:]
+
+        all_data[today][current_driver] = {
+            "count": count, "time": now_time,
+            "history": history,
+            "location_history": loc_history,
+            "lat": lat, "lng": lng
+        }
         save_json(DATA_FILE, all_data)
-        st.markdown('<div class="success-banner">✓ Submitted successfully! The manager can see your orders now.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="success-banner">✓ Submitted successfully!</div>', unsafe_allow_html=True)
 
     if prev_count > 0:
         st.info(f"Last recorded value: **{prev_count}** orders")
 
-    # عرض سجل التحديثات للمندوب
     history_list = all_data[today].get(current_driver, {}).get("history", [])
     if history_list:
         st.caption(f"🕐 Your updates today ({len(history_list)}): " + " · ".join(history_list))
@@ -302,7 +432,7 @@ if current_driver:
 # ██  توكن غلط  ██
 # ==================================================================================
 if driver_token and not current_driver:
-    st.error("❌ This link is invalid or has expired. Please request a new link from the manager.")
+    st.error("❌ This link is invalid or has expired.")
     st.stop()
 
 # ==================================================================================
@@ -335,8 +465,9 @@ avg_orders     = round(total_orders / active_drivers, 1) if active_drivers > 0 e
 top_driver     = max(today_data, key=lambda d: today_data[d].get("count", 0), default="-") if today_data else "-"
 top_val        = today_data.get(top_driver, {}).get("count", 0) if top_driver != "-" else 0
 
-# تنبيهات المتأخرين (جوا الشيفت بس ماعملوش update)
+# تنبيهات المتأخرين
 late_drivers = []
+idle_alert_drivers = []
 for d in drivers_list:
     online, _ = is_driver_online(d, shifts_data)
     if not online:
@@ -346,10 +477,18 @@ for d in drivers_list:
     mins  = minutes_since_update(t)
     if t is None or (mins is not None and mins > 60):
         late_drivers.append(d)
+    loc_hist = entry.get("location_history", [])
+    idle_periods = calc_idle_periods(loc_hist)
+    for p in idle_periods:
+        if p.get("still_idle"):
+            idle_alert_drivers.append((d, p["minutes"], p["from"]))
 
 if late_drivers:
     names = ", ".join([f"**{x}**" for x in late_drivers])
-    st.error(f"🚨 تنبيه: {len(late_drivers)} مندوب لم يحدّث بياناته — {names}")
+    st.error(f"🚨 لم يحدّث: {names}")
+if idle_alert_drivers:
+    for d, mins, since in idle_alert_drivers:
+        st.warning(f"⚠️ **{d}** واقف في نفس المكان منذ {since} ({mins} دقيقة)")
 
 col1, col2, col3, col4 = st.columns(4)
 with col1: st.metric("📦 إجمالي الطلبات", total_orders)
@@ -359,9 +498,10 @@ with col4: st.metric("🏆 الأعلى أداء", f"{top_driver.split()[0]} ({t
 
 st.markdown("---")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📋 الطلبات اليومية", "✏️ إدارة المناديب",
-    "🔗 روابط المناديب", "📁 الأرشيف", "📊 التقارير اليومية"
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "📋 الطلبات اليومية", "🗺️ الخريطة اللايف",
+    "✏️ إدارة المناديب", "🔗 روابط المناديب",
+    "📁 الأرشيف", "📊 التقارير اليومية"
 ])
 
 # ==================================================================================
@@ -376,20 +516,26 @@ with tab1:
             st.rerun()
 
     filtered = [d for d in drivers_list if search.lower() in d.lower()] if search else drivers_list
-
     cols = st.columns(3)
     for i, driver in enumerate(filtered):
         entry    = today_data.get(driver, {})
         count    = entry.get("count", 0)
         time_str = entry.get("time", None)
         history  = entry.get("history", [])
+        loc_hist = entry.get("location_history", [])
         mins     = minutes_since_update(time_str)
         online, shift_label = is_driver_online(driver, shifts_data)
+        idle_periods = calc_idle_periods(loc_hist)
+        is_idle_now  = any(p.get("still_idle") for p in idle_periods)
 
         if not online:
             card_class = "driver-card offline"
             badge      = '<span class="alert-badge badge-offline">⏸ Offline</span>'
-            status     = f"خارج الشيفت"
+            status     = "خارج الشيفت"
+        elif is_idle_now:
+            card_class = "driver-card danger"
+            badge      = '<span class="alert-badge badge-idle">🟠 واقف</span>'
+            status     = f"⏰ {time_str}" if time_str else "⚪ لم يُبلّغ بعد"
         elif time_str is None:
             card_class = "driver-card danger"
             badge      = '<span class="alert-badge badge-danger">⚠ لم يبلّغ</span>'
@@ -407,20 +553,19 @@ with tab1:
             badge      = '<span class="alert-badge badge-online">✓ Online</span>'
             status     = f"⏰ {time_str}" if time_str else "⚪ لم يُبلّغ بعد"
 
-        updates_info = f"تحديثات: {len(history)}" if history else ""
         color = "#1D9E75" if count > 0 and online else "#adb5bd"
+        has_loc = entry.get("lat") and entry.get("lng")
+        loc_icon = "📍" if has_loc else "📵"
 
         with cols[i % 3]:
             st.markdown(f"""
             <div class="{card_class}">
                 <div>
-                    <div class="driver-name">{driver} {badge}</div>
-                    <div style="font-size:0.78rem; color:#6c757d;">{status}</div>
-                    <div style="font-size:0.72rem; color:#adb5bd;">{updates_info}</div>
+                    <div class="driver-name">{driver} {badge} {loc_icon}</div>
+                    <div style="font-size:0.78rem;color:#6c757d;">{status}</div>
+                    <div style="font-size:0.72rem;color:#adb5bd;">تحديثات: {len(history)}</div>
                 </div>
-                <div class="driver-count {'zero' if count == 0 else ''}" style="color:{color}">
-                    {count}
-                </div>
+                <div class="driver-count {'zero' if count==0 else ''}" style="color:{color}">{count}</div>
             </div>
             """, unsafe_allow_html=True)
 
@@ -429,19 +574,22 @@ with tab1:
     with col_exp:
         rows = []
         for driver in drivers_list:
-            entry   = today_data.get(driver, {})
-            history = entry.get("history", [])
+            entry    = today_data.get(driver, {})
+            history  = entry.get("history", [])
+            loc_hist = entry.get("location_history", [])
+            idle_periods = calc_idle_periods(loc_hist)
+            idle_summary = " | ".join([f"{p['from']}→{p['to']}({p['minutes']}د)" for p in idle_periods]) if idle_periods else "-"
             rows.append({
-                "اسم المندوب":    driver,
-                "عدد الطلبات":    entry.get("count", 0),
-                "آخر تحديث":      entry.get("time", "-"),
-                "عدد التحديثات":  len(history),
-                "سجل التحديثات":  " | ".join(history) if history else "-"
+                "اسم المندوب":   driver,
+                "عدد الطلبات":   entry.get("count", 0),
+                "آخر تحديث":     entry.get("time", "-"),
+                "عدد التحديثات": len(history),
+                "سجل التحديثات": " | ".join(history) if history else "-",
+                "فترات التوقف":  idle_summary,
             })
         df_export = pd.DataFrame(rows)
         total_val = df_export["عدد الطلبات"].sum()
-        df_export.loc[len(df_export)] = ["الإجمالي", total_val, "", "", ""]
-
+        df_export.loc[len(df_export)] = ["الإجمالي", total_val, "", "", "", ""]
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             df_export.to_excel(writer, index=False, sheet_name=today)
@@ -450,20 +598,17 @@ with tab1:
             hfmt = wb.add_format({'bold': True, 'bg_color': '#1D9E75', 'font_color': 'white', 'border': 1, 'align': 'center'})
             for cn, cv in enumerate(df_export.columns.values):
                 ws.write(0, cn, cv, hfmt)
-            ws.set_column(0, 0, 22); ws.set_column(1, 4, 18)
-
+            ws.set_column(0, 0, 22); ws.set_column(1, 5, 18)
         st.download_button(
             label="⬇️ تحميل تقرير Excel", data=output.getvalue(),
             file_name=f"مناديب_{today}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
-
     with col_save:
         if st.button("💾 حفظ تقرير اليوم", use_container_width=True, type="secondary"):
             save_daily_report(today, today_data, drivers_list, shifts_data)
             st.success("✅ تم الحفظ!")
-
     with col_reset:
         if st.button("🗑️ تصفير اليوم", use_container_width=True, type="secondary"):
             if st.session_state.get("confirm_reset"):
@@ -478,9 +623,150 @@ with tab1:
                 st.warning("اضغط مرة تانية للتأكيد")
 
 # ==================================================================================
-# تاب 2: إدارة المناديب + الشيفتات
+# تاب 2: الخريطة اللايف
 # ==================================================================================
 with tab2:
+    col_map_refresh, col_map_info = st.columns([1, 3])
+    with col_map_refresh:
+        if st.button("🔄 تحديث الخريطة", use_container_width=True):
+            st.rerun()
+    with col_map_info:
+        st.caption("📍 الخريطة بتتحدث كل ما تضغط تحديث — اللوكيشن بيتسجل لما المندوب يعمل Submit")
+
+    # جمع بيانات المناديب اللي عندهم موقع
+    drivers_with_loc = []
+    for driver in drivers_list:
+        entry = today_data.get(driver, {})
+        lat   = entry.get("lat")
+        lng   = entry.get("lng")
+        if lat and lng:
+            try:
+                online, _ = is_driver_online(driver, shifts_data)
+                loc_hist  = entry.get("location_history", [])
+                idle_periods = calc_idle_periods(loc_hist)
+                is_idle   = any(p.get("still_idle") for p in idle_periods)
+                idle_min  = max([p["minutes"] for p in idle_periods if p.get("still_idle")], default=0)
+                drivers_with_loc.append({
+                    "name":    driver,
+                    "lat":     float(lat),
+                    "lng":     float(lng),
+                    "count":   entry.get("count", 0),
+                    "time":    entry.get("time", "-"),
+                    "online":  online,
+                    "idle":    is_idle,
+                    "idle_min": idle_min,
+                })
+            except:
+                pass
+
+    if not drivers_with_loc:
+        st.info("📵 مفيش مناديب بعتوا موقعهم لحد دلوقتي — لازم يعملوا Submit من لينكهم.")
+    else:
+        # بناء خريطة Leaflet بـ HTML
+        center_lat = sum(d["lat"] for d in drivers_with_loc) / len(drivers_with_loc)
+        center_lng = sum(d["lng"] for d in drivers_with_loc) / len(drivers_with_loc)
+
+        markers_js = ""
+        for d in drivers_with_loc:
+            if not d["online"]:
+                color = "gray"
+                icon  = "pause"
+            elif d["idle"]:
+                color = "orange"
+                icon  = "warning-sign"
+            else:
+                color = "green"
+                icon  = "truck"
+
+            idle_text = f"<br>⚠️ واقف منذ {d['idle_min']} دقيقة" if d["idle"] else ""
+            popup_text = f"""
+                <div style='font-family:Cairo,sans-serif;direction:rtl;text-align:right;min-width:160px'>
+                    <b>🚚 {d['name']}</b><br>
+                    📦 طلبات: {d['count']}<br>
+                    🕐 آخر تحديث: {d['time']}
+                    {idle_text}
+                </div>
+            """
+            markers_js += f"""
+                L.marker([{d['lat']}, {d['lng']}], {{
+                    icon: L.AwesomeMarkers.icon({{
+                        icon: '{icon}',
+                        markerColor: '{color}',
+                        prefix: 'glyphicon'
+                    }})
+                }})
+                .addTo(map)
+                .bindPopup(`{popup_text}`)
+                .bindTooltip('<b>{d["name"]}</b>', {{permanent: true, direction: 'top', offset: [0,-35]}});
+            """
+
+        map_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+            <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/Leaflet.awesome-markers/2.0.2/leaflet.awesome-markers.css"/>
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/Leaflet.awesome-markers/2.0.2/leaflet.awesome-markers.min.js"></script>
+            <style>
+                body {{ margin:0; padding:0; }}
+                #map {{ width:100%; height:520px; border-radius:12px; }}
+                .legend {{
+                    background: white; padding: 10px 14px; border-radius: 8px;
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.15); font-family: Cairo, sans-serif;
+                    font-size: 13px; line-height: 22px;
+                }}
+            </style>
+        </head>
+        <body>
+        <div id="map"></div>
+        <script>
+            var map = L.map('map').setView([{center_lat}, {center_lng}], 12);
+            L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+                attribution: '© OpenStreetMap'
+            }}).addTo(map);
+
+            {markers_js}
+
+            // Legend
+            var legend = L.control({{position: 'bottomright'}});
+            legend.onAdd = function() {{
+                var div = L.DomUtil.create('div', 'legend');
+                div.innerHTML =
+                    '<b>🚚 المناديب</b><br>' +
+                    '<span style="color:green">●</span> Online<br>' +
+                    '<span style="color:orange">●</span> واقف (idle)<br>' +
+                    '<span style="color:gray">●</span> Offline';
+                return div;
+            }};
+            legend.addTo(map);
+        </script>
+        </body>
+        </html>
+        """
+        st.components.v1.html(map_html, height=540)
+
+        # ── جدول تفاصيل المواقع ──
+        st.markdown("### 📋 تفاصيل المواقع")
+        map_rows = []
+        for d in drivers_with_loc:
+            status = "⏸ Offline" if not d["online"] else ("🟠 واقف" if d["idle"] else "🟢 Online")
+            map_rows.append({
+                "المندوب":       d["name"],
+                "الحالة":        status,
+                "طلبات":         d["count"],
+                "آخر تحديث":    d["time"],
+                "توقف (دقيقة)": d["idle_min"] if d["idle"] else 0,
+                "Lat":           round(d["lat"], 5),
+                "Lng":           round(d["lng"], 5),
+            })
+        st.dataframe(pd.DataFrame(map_rows), use_container_width=True, hide_index=True)
+
+# ==================================================================================
+# تاب 3: إدارة المناديب
+# ==================================================================================
+with tab3:
     st.markdown("### ➕ إضافة مناديب جدد")
     st.info("اكتب كل اسم في سطر منفصل ثم اضغط إضافة")
     new_names_input = st.text_area("أسماء جديدة", placeholder="محمد إبراهيم\nعلي حسن", height=120, label_visibility="collapsed")
@@ -497,9 +783,7 @@ with tab2:
 
     st.markdown("---")
     st.markdown("### ✏️ تعديل / حذف / شيفتات المناديب")
-    st.caption("اضغط على اسم المندوب لتعديل شيفتاته — أو اضغط 🗑️ لحذفه")
 
-    # نافذة تأكيد الحذف
     if st.session_state.get("pending_delete"):
         driver_to_del = st.session_state["pending_delete"]
         st.warning(f"⚠️ هتحذف **{driver_to_del}** — اكتب كلمة سر المدير للتأكيد")
@@ -523,11 +807,10 @@ with tab2:
                 st.rerun()
         st.markdown("---")
 
-    # قائمة المناديب مع الشيفتات
     for i, driver in enumerate(drivers_list):
-        safe_key = driver.replace(" ", "_").replace("/", "_")
+        safe_key      = driver.replace(" ", "_").replace("/", "_")
         driver_shifts = shifts_data.get(driver, [])
-        online, shift_lbl = is_driver_online(driver, shifts_data)
+        online, _     = is_driver_online(driver, shifts_data)
 
         with st.expander(f"{'🟢' if online else '⚫'} {driver}  —  {'Online' if online else 'Offline'}", expanded=False):
             c_edit, c_del = st.columns([5, 1])
@@ -540,17 +823,16 @@ with tab2:
                     st.rerun()
 
             st.markdown("**⏰ الشيفتات:**")
-            # اعرض الشيفتات الموجودة
             updated_shifts = []
             for si in range(3):
                 shift = driver_shifts[si] if si < len(driver_shifts) else {"start": "", "end": ""}
                 sc1, sc2, sc3 = st.columns([2, 2, 1])
                 with sc1:
-                    s_start = st.text_input(f"بداية شيفت {si+1}", value=shift.get("start", ""), placeholder="08:00", key=f"shift_start_{safe_key}_{si}")
+                    s_start = st.text_input(f"بداية شيفت {si+1}", value=shift.get("start", ""), placeholder="08:00", key=f"ss_{safe_key}_{si}")
                 with sc2:
-                    s_end   = st.text_input(f"نهاية شيفت {si+1}", value=shift.get("end", ""), placeholder="16:00", key=f"shift_end_{safe_key}_{si}")
+                    s_end   = st.text_input(f"نهاية شيفت {si+1}", value=shift.get("end", ""), placeholder="16:00", key=f"se_{safe_key}_{si}")
                 with sc3:
-                    st.markdown("<div style='padding-top:28px; font-size:0.8rem; color:#adb5bd;'>HH:MM</div>", unsafe_allow_html=True)
+                    st.markdown("<div style='padding-top:28px;font-size:0.8rem;color:#adb5bd;'>HH:MM</div>", unsafe_allow_html=True)
                 if s_start and s_end:
                     updated_shifts.append({"start": s_start.strip(), "end": s_end.strip()})
 
@@ -564,7 +846,7 @@ with tab2:
                 shifts_text = "  |  ".join([f"شيفت {j+1}: {s['start']} ← {s['end']}" for j, s in enumerate(driver_shifts)])
                 st.markdown(f'<div class="shift-box">📋 {shifts_text}</div>', unsafe_allow_html=True)
             else:
-                st.caption("⚠️ لا توجد شيفتات — المندوب يُعتبر Online دائماً")
+                st.caption("⚠️ لا توجد شيفتات — يُعتبر Online دائماً")
 
     st.markdown("---")
     if st.button("💾 حفظ تعديلات الأسماء", type="secondary", use_container_width=True):
@@ -572,10 +854,10 @@ with tab2:
         st.success("✅ تم الحفظ!")
 
 # ==================================================================================
-# تاب 3: روابط المناديب
+# تاب 4: روابط المناديب
 # ==================================================================================
-with tab3:
-    st.info("⚠️ الروابط دي بتتغير كل يوم تلقائياً — ابعتها للمناديب كل صباح على واتساب.")
+with tab4:
+    st.info("⚠️ الروابط بتتغير كل يوم — ابعتها كل صباح على واتساب.")
     saved_url = config.get("base_url", "https://keitadeliveryanalysis-6zvs3tjytsugs3yweiq2s6.streamlit.app")
     base_url  = st.text_input("🌐 رابط الموقع الأساسي", value=saved_url)
     if st.button("💾 حفظ الرابط", type="secondary"):
@@ -601,30 +883,33 @@ with tab3:
     st.text_area("رسالة واتساب", wa_msg, height=280)
 
 # ==================================================================================
-# تاب 4: الأرشيف
+# تاب 5: الأرشيف
 # ==================================================================================
-with tab4:
+with tab5:
     st.subheader("📁 سجل الأيام السابقة")
     available_dates = sorted(all_data.keys(), reverse=True)
     if not available_dates:
-        st.info("مفيش بيانات محفوظة لحد دلوقتي.")
+        st.info("مفيش بيانات محفوظة.")
     else:
         selected_date = st.selectbox("اختار يوم", available_dates)
         day_data = all_data.get(selected_date, {})
         rows = []
         for driver in drivers_list:
-            entry   = day_data.get(driver, {})
-            history = entry.get("history", [])
+            entry    = day_data.get(driver, {})
+            history  = entry.get("history", [])
+            loc_hist = entry.get("location_history", [])
+            idle_periods = calc_idle_periods(loc_hist)
+            idle_summary = " | ".join([f"{p['from']}→{p['to']}({p['minutes']}د)" for p in idle_periods]) if idle_periods else "-"
             rows.append({
                 "اسم المندوب":   driver,
                 "عدد الطلبات":   entry.get("count", 0),
                 "وقت التحديث":   entry.get("time", "-"),
                 "عدد التحديثات": len(history),
-                "سجل التحديثات": " | ".join(history) if history else "-"
+                "سجل التحديثات": " | ".join(history) if history else "-",
+                "فترات التوقف":  idle_summary,
             })
         df_archive = pd.DataFrame(rows)
         st.dataframe(df_archive, use_container_width=True, hide_index=True)
-
         output2 = BytesIO()
         with pd.ExcelWriter(output2, engine="xlsxwriter") as writer:
             df_archive.to_excel(writer, index=False, sheet_name=selected_date)
@@ -635,20 +920,16 @@ with tab4:
         )
 
 # ==================================================================================
-# تاب 5: التقارير اليومية المحفوظة
+# تاب 6: التقارير اليومية
 # ==================================================================================
-with tab5:
+with tab6:
     st.subheader("📊 التقارير اليومية المحفوظة")
-    st.caption("بتتحفظ تلقائياً كل يوم — أو يدوياً من تاب الطلبات")
-
     saved_reports = load_json(REPORTS_FILE, {})
     report_dates  = sorted(saved_reports.keys(), reverse=True)
 
     if not report_dates:
         st.info("مفيش تقارير محفوظة لحد دلوقتي.")
     else:
-        # ملخص أحدث 4 أيام
-        st.markdown("### ملخص الأيام")
         n_cols = min(len(report_dates), 4)
         summary_cols = st.columns(n_cols)
         for idx, rdate in enumerate(report_dates[:4]):
@@ -657,7 +938,7 @@ with tab5:
                 st.markdown(f"""
                 <div class="report-card">
                     <div class="report-date">📅 {rdate}</div>
-                    <div class="report-total">إجمالي: <b>{rep.get('total', 0)}</b> طلب</div>
+                    <div class="report-total">إجمالي: <b>{rep.get('total',0)}</b> طلب</div>
                     <div class="report-total" style="font-size:0.75rem;color:#adb5bd;">حُفظ: {rep.get('saved_at','-')}</div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -670,7 +951,6 @@ with tab5:
         if rep_rows:
             df_rep = pd.DataFrame(rep_rows)
             st.dataframe(df_rep, use_container_width=True, hide_index=True)
-
             out_rep = BytesIO()
             with pd.ExcelWriter(out_rep, engine="xlsxwriter") as writer:
                 df_rep.to_excel(writer, index=False, sheet_name=selected_report)
@@ -679,8 +959,7 @@ with tab5:
                 hfmt = wb.add_format({'bold': True, 'bg_color': '#1D9E75', 'font_color': 'white', 'border': 1, 'align': 'center'})
                 for cn, cv in enumerate(df_rep.columns.values):
                     ws.write(0, cn, cv, hfmt)
-                ws.set_column(0, 0, 22); ws.set_column(1, 5, 18)
-
+                ws.set_column(0, 0, 22); ws.set_column(1, 6, 20)
             st.download_button(
                 label=f"⬇️ تحميل تقرير {selected_report}", data=out_rep.getvalue(),
                 file_name=f"تقرير_{selected_report}.xlsx",
