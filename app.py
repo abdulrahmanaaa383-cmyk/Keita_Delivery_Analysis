@@ -29,6 +29,7 @@ st.set_page_config(
 DATA_FILE    = "delivery_data.json"
 DRIVERS_FILE = "drivers.json"
 CONFIG_FILE  = "config.json"
+REPORTS_FILE = "daily_reports.json"   # ← تقارير يومية محفوظة تلقائياً
 
 ADMIN_PASSWORD = "admin123"   # <-- غيّر كلمة السر هنا
 
@@ -53,6 +54,44 @@ def get_driver_token(driver_name: str, day: str) -> str:
     raw = f"{driver_name}_{day}_secret_key_2025"
     return hashlib.md5(raw.encode()).hexdigest()[:10]
 
+def minutes_since_update(time_str):
+    """كم دقيقة مرت من آخر تحديث"""
+    if not time_str:
+        return None
+    try:
+        now = now_saudi()
+        last = now.replace(
+            hour=int(time_str.split(":")[0]),
+            minute=int(time_str.split(":")[1]),
+            second=0, microsecond=0
+        )
+        diff = (now - last).total_seconds() / 60
+        return diff
+    except:
+        return None
+
+def save_daily_report(day, data, drivers):
+    """حفظ تقرير يومي تلقائي في daily_reports.json"""
+    reports = load_json(REPORTS_FILE, {})
+    rows = []
+    total = 0
+    for driver in drivers:
+        entry = data.get(driver, {})
+        count = entry.get("count", 0)
+        total += count
+        rows.append({
+            "اسم المندوب": driver,
+            "عدد الطلبات": count,
+            "آخر تحديث": entry.get("time", "-")
+        })
+    rows.append({"اسم المندوب": "الإجمالي", "عدد الطلبات": total, "آخر تحديث": ""})
+    reports[day] = {
+        "saved_at": now_saudi().strftime("%Y-%m-%d %H:%M"),
+        "rows": rows,
+        "total": total
+    }
+    save_json(REPORTS_FILE, reports)
+
 # ==================================================================================
 # تحميل البيانات
 # ==================================================================================
@@ -74,6 +113,12 @@ all_data = load_json(DATA_FILE, {})
 today    = get_today()
 if today not in all_data:
     all_data[today] = {}
+
+# ── حفظ تقرير أمس تلقائياً لو لسه مش محفوظ ──
+reports   = load_json(REPORTS_FILE, {})
+yesterday = (now_saudi() - timedelta(days=1)).strftime("%Y-%m-%d")
+if yesterday in all_data and yesterday not in reports:
+    save_daily_report(yesterday, all_data[yesterday], drivers_list)
 
 # ==================================================================================
 # تحديد نوع الصفحة
@@ -119,9 +164,26 @@ st.markdown("""
         justify-content: space-between;
         align-items: center;
     }
+    .driver-card.danger {
+        border: 2px solid #dc3545 !important;
+        background: #fff5f5 !important;
+    }
+    .driver-card.warning {
+        border: 2px solid #ffc107 !important;
+        background: #fffdf0 !important;
+    }
     .driver-name  { font-weight: 600; font-size: 0.95rem; }
     .driver-count { font-size: 1.4rem; font-weight: 700; color: #1D9E75; }
     .driver-count.zero { color: #adb5bd; }
+    .alert-badge {
+        font-size: 0.7rem;
+        padding: 2px 7px;
+        border-radius: 12px;
+        font-weight: 700;
+        margin-right: 4px;
+    }
+    .badge-danger  { background: #dc3545; color: white; }
+    .badge-warning { background: #ffc107; color: #333; }
     .link-box {
         background: #f1f3f5;
         border-radius: 8px;
@@ -154,6 +216,15 @@ st.markdown("""
         padding: 12px 16px;
         border: 1px solid #e9ecef;
     }
+    .report-card {
+        background: white;
+        border-radius: 10px;
+        padding: 1rem 1.25rem;
+        border: 1px solid #e9ecef;
+        margin-bottom: 10px;
+    }
+    .report-date  { font-weight: 700; font-size: 1rem; color: #1D9E75; }
+    .report-total { font-size: 0.85rem; color: #6c757d; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -167,7 +238,6 @@ if mode != "admin" and not driver_token:
     st.info("Each driver enters their order count next to their name, then press **Save All** at the bottom.")
     st.markdown("---")
 
-    # Header
     h1, h2, h3 = st.columns([3, 2, 2])
     h1.markdown("**Driver Name**")
     h2.markdown("**Number of Orders**")
@@ -286,6 +356,21 @@ avg_orders     = round(total_orders / active_drivers, 1) if active_drivers > 0 e
 top_driver     = max(today_data, key=lambda d: today_data[d].get("count", 0), default="-") if today_data else "-"
 top_val        = today_data.get(top_driver, {}).get("count", 0) if top_driver != "-" else 0
 
+# ── تنبيه المناديب المتأخرين (أكتر من ساعة بدون تحديث) ──
+late_drivers = []
+for d in drivers_list:
+    entry = today_data.get(d, {})
+    t     = entry.get("time", None)
+    mins  = minutes_since_update(t)
+    if t is None:
+        late_drivers.append((d, None))
+    elif mins is not None and mins > 60:
+        late_drivers.append((d, round(mins)))
+
+if late_drivers:
+    names = ", ".join([f"**{x[0]}**" for x in late_drivers])
+    st.error(f"🚨 تنبيه: {len(late_drivers)} مندوب لم يحدّث بياناته — {names}")
+
 col1, col2, col3, col4 = st.columns(4)
 with col1:
     st.metric("📦 إجمالي الطلبات", total_orders)
@@ -298,7 +383,13 @@ with col4:
 
 st.markdown("---")
 
-tab1, tab2, tab3, tab4 = st.tabs(["📋 الطلبات اليومية", "✏️ إدارة المناديب", "🔗 روابط المناديب", "📁 الأرشيف"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📋 الطلبات اليومية",
+    "✏️ إدارة المناديب",
+    "🔗 روابط المناديب",
+    "📁 الأرشيف",
+    "📊 التقارير اليومية"
+])
 
 # ==================================================================================
 # تاب 1: الطلبات اليومية
@@ -318,13 +409,32 @@ with tab1:
         entry    = today_data.get(driver, {})
         count    = entry.get("count", 0)
         time_str = entry.get("time", None)
+        mins     = minutes_since_update(time_str)
+
+        # تحديد حالة التنبيه
+        if time_str is None:
+            card_class = "driver-card danger"
+            badge      = '<span class="alert-badge badge-danger">⚠ لم يبلّغ</span>'
+            status     = "⚪ لم يُبلّغ بعد"
+        elif mins is not None and mins > 60:
+            card_class = "driver-card danger"
+            badge      = f'<span class="alert-badge badge-danger">🔴 منذ {round(mins)} د</span>'
+            status     = f"⏰ {time_str}"
+        elif mins is not None and mins > 30:
+            card_class = "driver-card warning"
+            badge      = f'<span class="alert-badge badge-warning">🟡 منذ {round(mins)} د</span>'
+            status     = f"⏰ {time_str}"
+        else:
+            card_class = "driver-card"
+            badge      = ""
+            status     = f"⏰ {time_str}" if time_str else "⚪ لم يُبلّغ بعد"
+
+        color = "#1D9E75" if count > 0 else "#adb5bd"
         with cols[i % 3]:
-            color  = "#1D9E75" if count > 0 else "#adb5bd"
-            status = f"⏰ {time_str}" if time_str else "⚪ لم يُبلّغ بعد"
             st.markdown(f"""
-            <div class="driver-card">
+            <div class="{card_class}">
                 <div>
-                    <div class="driver-name">{driver}</div>
+                    <div class="driver-name">{driver} {badge}</div>
                     <div style="font-size:0.78rem; color:#6c757d;">{status}</div>
                 </div>
                 <div class="driver-count {'zero' if count == 0 else ''}" style="color:{color}">
@@ -335,7 +445,7 @@ with tab1:
 
     st.markdown("---")
 
-    col_exp, col_reset = st.columns([2, 1])
+    col_exp, col_save, col_reset = st.columns([2, 1, 1])
     with col_exp:
         rows = []
         for driver in drivers_list:
@@ -371,13 +481,20 @@ with tab1:
             use_container_width=True
         )
 
+    with col_save:
+        if st.button("💾 حفظ تقرير اليوم", use_container_width=True, type="secondary"):
+            save_daily_report(today, today_data, drivers_list)
+            st.success("✅ تم الحفظ في التقارير!")
+
     with col_reset:
         if st.button("🗑️ تصفير اليوم", use_container_width=True, type="secondary"):
             if st.session_state.get("confirm_reset"):
+                # حفظ تقرير تلقائي قبل التصفير
+                save_daily_report(today, today_data, drivers_list)
                 all_data[today] = {}
                 save_json(DATA_FILE, all_data)
                 st.session_state["confirm_reset"] = False
-                st.success("تم التصفير!")
+                st.success("تم الحفظ والتصفير!")
                 st.rerun()
             else:
                 st.session_state["confirm_reset"] = True
@@ -410,7 +527,31 @@ with tab2:
     st.markdown("### ✏️ تعديل أو حذف مندوب")
     st.caption("عدّل الاسم مباشرة ثم اضغط 'حفظ التعديلات' — أو اضغط 🗑️ لحذف مندوب")
 
-    to_delete = []
+    # ── نافذة تأكيد الحذف بكلمة السر ──
+    if st.session_state.get("pending_delete"):
+        driver_to_del = st.session_state["pending_delete"]
+        st.warning(f"⚠️ هتحذف **{driver_to_del}** — اكتب كلمة سر المدير للتأكيد")
+        col_pw, col_confirm, col_cancel = st.columns([3, 1, 1])
+        with col_pw:
+            del_pw = st.text_input("كلمة السر", type="password", key="del_pw_input",
+                                   label_visibility="collapsed", placeholder="كلمة سر المدير")
+        with col_confirm:
+            if st.button("✅ تأكيد", type="primary", use_container_width=True):
+                if del_pw == ADMIN_PASSWORD:
+                    if driver_to_del in drivers_list:
+                        drivers_list.remove(driver_to_del)
+                    save_json(DRIVERS_FILE, drivers_list)
+                    st.session_state["pending_delete"] = None
+                    st.success(f"✅ تم حذف {driver_to_del}")
+                    st.rerun()
+                else:
+                    st.error("❌ كلمة السر غلط!")
+        with col_cancel:
+            if st.button("إلغاء", use_container_width=True):
+                st.session_state["pending_delete"] = None
+                st.rerun()
+        st.markdown("---")
+
     for i, driver in enumerate(drivers_list):
         c_num, c_edit, c_del = st.columns([1, 5, 1])
         with c_num:
@@ -428,14 +569,8 @@ with tab2:
             drivers_list[i] = new_name
         with c_del:
             if st.button("🗑️", key=f"del_{i}", help=f"حذف {driver}"):
-                to_delete.append(driver)
-
-    if to_delete:
-        for d in to_delete:
-            if d in drivers_list:
-                drivers_list.remove(d)
-        save_json(DRIVERS_FILE, drivers_list)
-        st.rerun()
+                st.session_state["pending_delete"] = driver
+                st.rerun()
 
     if st.button("💾 حفظ التعديلات", type="secondary", use_container_width=True):
         save_json(DRIVERS_FILE, drivers_list)
@@ -447,7 +582,6 @@ with tab2:
 with tab3:
     st.info("⚠️ الروابط دي بتتغير كل يوم تلقائياً — ابعتها للمناديب كل صباح على واتساب.")
 
-    # ── الرابط الأساسي محفوظ في config.json ──
     saved_url = config.get("base_url", "https://keitadeliveryanalysis-6zvs3tjytsugs3yweiq2s6.streamlit.app")
     base_url  = st.text_input(
         "🌐 رابط الموقع الأساسي",
@@ -512,6 +646,78 @@ with tab4:
             file_name=f"مناديب_{selected_date}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+
+# ==================================================================================
+# تاب 5: التقارير اليومية المحفوظة
+# ==================================================================================
+with tab5:
+    st.subheader("📊 التقارير اليومية المحفوظة")
+    st.caption("كل يوم بيتحفظ تلقائياً — أو تقدر تحفظه يدوياً من تاب الطلبات اليومية")
+
+    saved_reports = load_json(REPORTS_FILE, {})
+    report_dates  = sorted(saved_reports.keys(), reverse=True)
+
+    if not report_dates:
+        st.info("مفيش تقارير محفوظة لحد دلوقتي — هيتحفظ تلقائياً بعد منتصف الليل.")
+    else:
+        # ── ملخص أحدث 4 أيام ──
+        st.markdown("### ملخص الأيام")
+        summary_cols = st.columns(min(len(report_dates), 4))
+        for idx, rdate in enumerate(report_dates[:4]):
+            rep = saved_reports[rdate]
+            with summary_cols[idx % min(len(report_dates), 4)]:
+                st.markdown(f"""
+                <div class="report-card">
+                    <div class="report-date">📅 {rdate}</div>
+                    <div class="report-total">إجمالي: <b>{rep.get('total', 0)}</b> طلب</div>
+                    <div class="report-total" style="font-size:0.75rem; color:#adb5bd;">حُفظ: {rep.get('saved_at', '-')}</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+        st.markdown("---")
+
+        # ── عرض تقرير محدد ──
+        selected_report = st.selectbox("اختار يوم لعرض تقريره", report_dates, key="sel_report")
+        rep_data = saved_reports[selected_report]
+        rep_rows = rep_data.get("rows", [])
+
+        if rep_rows:
+            df_rep = pd.DataFrame(rep_rows)
+            st.dataframe(df_rep, use_container_width=True, hide_index=True)
+
+            out_rep = BytesIO()
+            with pd.ExcelWriter(out_rep, engine="xlsxwriter") as writer:
+                df_rep.to_excel(writer, index=False, sheet_name=selected_report)
+                wb   = writer.book
+                ws   = writer.sheets[selected_report]
+                hfmt = wb.add_format({
+                    'bold': True, 'bg_color': '#1D9E75', 'font_color': 'white',
+                    'border': 1, 'align': 'center'
+                })
+                for cn, cv in enumerate(df_rep.columns.values):
+                    ws.write(0, cn, cv, hfmt)
+                ws.set_column(0, 0, 25)
+                ws.set_column(1, 2, 18)
+
+            st.download_button(
+                label=f"⬇️ تحميل تقرير {selected_report}",
+                data=out_rep.getvalue(),
+                file_name=f"تقرير_{selected_report}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+
+        st.markdown("---")
+        if st.button("🗑️ حذف هذا التقرير", type="secondary"):
+            if st.session_state.get("confirm_del_report"):
+                del saved_reports[selected_report]
+                save_json(REPORTS_FILE, saved_reports)
+                st.session_state["confirm_del_report"] = False
+                st.success("تم الحذف!")
+                st.rerun()
+            else:
+                st.session_state["confirm_del_report"] = True
+                st.warning("اضغط مرة تانية للتأكيد")
 
 st.markdown("---")
 if st.button("🚪 تسجيل خروج"):
