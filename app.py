@@ -356,33 +356,52 @@ if current_driver:
     st.subheader("📦 Enter your number of orders for today.")
     count = st.number_input("Number of Orders", min_value=0, max_value=999, value=prev_count, step=1, label_visibility="collapsed")
 
-    # ── JavaScript لطلب الموقع وإرساله ──
-    loc_component = st.empty()
-    loc_component.markdown("""
-    <div id="loc_status" style="font-size:0.8rem;color:#6c757d;margin-bottom:8px;">📍 Getting your location...</div>
-    <input type="hidden" id="driver_lat" value="">
-    <input type="hidden" id="driver_lng" value="">
-    <script>
-    function sendLocation() {
-        if (navigator.geolocation) {
-            navigator.geolocation.getCurrentPosition(function(pos) {
-                document.getElementById('driver_lat').value = pos.coords.latitude;
-                document.getElementById('driver_lng').value = pos.coords.longitude;
-                document.getElementById('loc_status').innerHTML =
-                    '📍 Location: ' + pos.coords.latitude.toFixed(4) + ', ' + pos.coords.longitude.toFixed(4);
-                // حفظ في sessionStorage عشان Streamlit يقراها
-                sessionStorage.setItem('driver_lat', pos.coords.latitude);
-                sessionStorage.setItem('driver_lng', pos.coords.longitude);
-            }, function(err) {
-                document.getElementById('loc_status').innerHTML = '⚠️ Location not available';
-            });
-        }
+   # ── JavaScript لطلب الموقع وإرساله ──
+loc_component = st.empty()
+loc_component.components.v1.html("""
+<!DOCTYPE html>
+<html>
+<body>
+<div id="loc_status" style="font-size:0.8rem;color:#6c757d;font-family:Cairo,sans-serif;">
+📍 Getting your location...
+</div>
+
+<script>
+function updateLocation() {
+    if (!navigator.geolocation) {
+        document.getElementById("loc_status").innerHTML = "⚠️ Geolocation not supported";
+        return;
     }
-    sendLocation();
-    // تحديث كل دقيقة
-    setInterval(sendLocation, 60000);
-    </script>
-    """, unsafe_allow_html=True)
+
+    navigator.geolocation.getCurrentPosition(
+        function(position) {
+            const lat = position.coords.latitude;
+            const lng = position.coords.longitude;
+
+            localStorage.setItem("driver_lat", lat);
+            localStorage.setItem("driver_lng", lng);
+
+            document.getElementById("loc_status").innerHTML =
+                `📍 Location: ${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+        },
+        function(error) {
+            document.getElementById("loc_status").innerHTML =
+                "⚠️ Please allow location access";
+        },
+        {
+            enableHighAccuracy: true,
+            timeout: 10000,
+            maximumAge: 0
+        }
+    );
+}
+
+updateLocation();
+setInterval(updateLocation, 30000);
+</script>
+</body>
+</html>
+""", height=60)
 
     # ── الموقع المحفوظ من آخر submit ──
     prev_lat = prev_entry.get("lat")
