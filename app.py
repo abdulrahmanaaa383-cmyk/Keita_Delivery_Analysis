@@ -648,7 +648,8 @@ with tab3:
                 save_json(SHIFTS_FILE,shifts_data)
                 st.success("✅ تم!"); st.rerun()
             if driver_shifts:
-                st.markdown(f'<div class="shift-box">📋 {"  |  ".join([f"شيفت {j+1}: {s[\"start\"]} ← {s[\"end\"]}" for j,s in enumerate(driver_shifts)])}</div>',unsafe_allow_html=True)
+                shifts_text = "  |  ".join([f"شيفت {j+1}: {s['start']} ← {s['end']}" for j,s in enumerate(driver_shifts)])
+                st.markdown(f'<div class="shift-box">📋 {shifts_text}</div>', unsafe_allow_html=True)
             else:
                 st.caption("⚠️ لا توجد شيفتات — Online دائماً")
 
