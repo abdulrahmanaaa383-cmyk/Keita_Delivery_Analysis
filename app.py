@@ -257,75 +257,81 @@ if current_driver:
     # الـ redirect هيخلي Streamlit يستقبل الموقع ويحفظه
     loc_html = f"""
 <div id="loc_status" style="background:#e8f8f0;border:1.5px solid #1D9E75;border-radius:10px;padding:12px 16px;margin:10px 0;font-size:.9rem;color:#155724;">
-    ⏳ جاري تحديد موقعك...
+    \u23f3 Getting your location...
+</div>
+<div id="loc_denied" style="display:none;background:#fff3cd;border:1px solid #ffc107;border-radius:10px;padding:12px 16px;margin:10px 0;font-size:.85rem;color:#856404;">
+    \u26a0\ufe0f <b>Location access denied.</b><br><br>
+    <b>iPhone (Safari):</b> Settings \u2192 Safari \u2192 Location \u2192 Allow<br>
+    <b>Android (Chrome):</b> Tap the \U0001f512 lock icon \u2192 Permissions \u2192 Location \u2192 Allow<br><br>
+    Then <b>refresh the page</b>.
 </div>
 <script>
-var redirected = false;
-
 function getAndSendLocation() {{
     if (!navigator.geolocation) {{
-        document.getElementById('loc_status').innerHTML = '❌ المتصفح مش بيدعم GPS — فعّل اللوكيشن';
+        document.getElementById('loc_status').innerHTML = '\u274c Browser does not support GPS.';
         return;
     }}
     navigator.geolocation.getCurrentPosition(function(pos) {{
         var lat = pos.coords.latitude.toFixed(6);
         var lng = pos.coords.longitude.toFixed(6);
         var acc = Math.round(pos.coords.accuracy);
+        document.getElementById('loc_status').style.display = 'block';
+        document.getElementById('loc_denied').style.display = 'none';
         document.getElementById('loc_status').innerHTML =
-            '✅ موقعك محدد — دقة: ' + acc + ' متر<br>' +
-            '<small>📍 ' + lat + ', ' + lng + '</small>';
-        // إرسال الموقع للسيرفر عبر redirect
+            '\u2705 Location active \u2014 accuracy: ' + acc + 'm &nbsp;|&nbsp; \U0001f4cd ' + lat + ', ' + lng;
         var newUrl = '{base_url_clean}/?driver={token_for_driver}&lat=' + lat + '&lng=' + lng;
-        // استخدام fetch بدل redirect عشان الصفحة متتحركش
         fetch(newUrl).catch(function(){{}});
     }}, function(err) {{
-        var msgs = {{1:'❌ رفضت صلاحية الموقع — اضغط على أيقونة القفل وسمح بالموقع',
-                    2:'⚠️ تعذر تحديد الموقع — تأكد من تفعيل GPS',
-                    3:'⏱ انتهت مهلة تحديد الموقع — حاول تاني'}};
-        document.getElementById('loc_status').innerHTML = msgs[err.code] || '⚠️ خطأ في الموقع';
+        if (err.code === 1) {{
+            document.getElementById('loc_status').style.display = 'none';
+            document.getElementById('loc_denied').style.display = 'block';
+        }} else if (err.code === 2) {{
+            document.getElementById('loc_status').innerHTML = '\u26a0\ufe0f Could not determine location \u2014 make sure GPS is on.';
+        }} else {{
+            document.getElementById('loc_status').innerHTML = '\u23f1 Location timed out \u2014 retrying...';
+        }}
     }}, {{enableHighAccuracy:true, timeout:15000, maximumAge:30000}});
 }}
-
-// أول مرة فور
 getAndSendLocation();
-// كل دقيقة
 setInterval(getAndSendLocation, 60000);
 </script>
 """
-    st.components.v1.html(loc_html, height=90)
+    st.components.v1.html(loc_html, height=140)
 
     if prev_lat and prev_lng:
-        st.caption(f"📍 آخر موقع محفوظ: {prev_lat}, {prev_lng} — {prev_entry.get('time','')}")
+        st.caption(f"\U0001f4cd Last saved location: {prev_lat}, {prev_lng} \u2014 {prev_entry.get('time','')}")
 
     st.markdown("---")
-    st.subheader("📦 أدخل عدد طلباتك النهارده")
-    count = st.number_input("عدد الطلبات", min_value=0, max_value=999, value=prev_count, step=1, label_visibility="collapsed")
+    st.subheader("\U0001f4e6 Enter your number of orders for today")
+    count = st.number_input("Orders", min_value=0, max_value=999, value=prev_count, step=1, label_visibility="collapsed")
 
-    if st.button("✅ إرسال", use_container_width=True, type="primary"):
+    if st.button("\u2705 Submit", use_container_width=True, type="primary"):
         now_time = now_saudi().strftime("%H:%M")
         entry    = all_data[today].get(current_driver,{"count":0,"time":None,"history":[],"location_history":[]})
         history  = entry.get("history",[])
         history.append(now_time)
         all_data[today][current_driver] = {**entry,"count":count,"time":now_time,"history":history}
         save_json(DATA_FILE, all_data)
-        st.markdown('<div class="success-banner">✓ تم الإرسال بنجاح!</div>', unsafe_allow_html=True)
+        st.markdown('<div class="success-banner">\u2713 Submitted successfully! Manager can see your orders now.</div>', unsafe_allow_html=True)
         st.rerun()
 
     if prev_count > 0:
-        st.info(f"آخر قيمة مسجلة: **{prev_count}** طلب")
+        st.info(f"Last recorded value: **{prev_count}** orders")
 
     history_list = all_data[today].get(current_driver,{}).get("history",[])
     if history_list:
-        st.caption(f"🕐 تحديثاتك النهارده ({len(history_list)}): " + " · ".join(history_list))
+        st.caption(f"\U0001f550 Your updates today ({len(history_list)}): " + " \u00b7 ".join(history_list))
 
     st.markdown("---")
     st.markdown("""
     <div style='background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:10px 14px;font-size:.82rem;color:#856404;'>
-    📌 <b>عشان اللينك يفضل معاك:</b><br>
-    Android: المتصفح ← القائمة ⋮ ← <b>إضافة إلى الشاشة الرئيسية</b><br>
-    iPhone: Safari ← زر المشاركة ← <b>Add to Home Screen</b>
+    \U0001f4cc <b>Keep this link handy:</b><br>
+    Android: Browser menu \u22ee \u2192 <b>Add to Home Screen</b><br>
+    iPhone: Safari \u2192 Share button \u2192 <b>Add to Home Screen</b>
     </div>
     """, unsafe_allow_html=True)
+    st.stop()
+
     st.stop()
 
 # توكن غلط
