@@ -266,34 +266,55 @@ if current_driver:
     Then <b>refresh the page</b>.
 </div>
 <script>
+var locationSent = false;
+
 function getAndSendLocation() {{
     if (!navigator.geolocation) {{
-        document.getElementById('loc_status').innerHTML = '\u274c Browser does not support GPS.';
+        document.getElementById('loc_status').innerHTML = '❌ Browser does not support GPS.';
         return;
     }}
     navigator.geolocation.getCurrentPosition(function(pos) {{
         var lat = pos.coords.latitude.toFixed(6);
         var lng = pos.coords.longitude.toFixed(6);
         var acc = Math.round(pos.coords.accuracy);
+
         document.getElementById('loc_status').style.display = 'block';
         document.getElementById('loc_denied').style.display = 'none';
         document.getElementById('loc_status').innerHTML =
-            '\u2705 Location active \u2014 accuracy: ' + acc + 'm &nbsp;|&nbsp; \U0001f4cd ' + lat + ', ' + lng;
-        var newUrl = '{base_url_clean}/?driver={token_for_driver}&lat=' + lat + '&lng=' + lng;
-        fetch(newUrl).catch(function(){{}});
+            '✅ Location active — accuracy: ' + acc + 'm | 📍 ' + lat + ', ' + lng;
+
+        // أول مرة: ابعت الموقع عن طريق reload للصفحة الأب
+        if (!locationSent) {{
+            locationSent = true;
+            var newUrl = '{base_url_clean}/?driver={token_for_driver}&lat=' + lat + '&lng=' + lng;
+            // بنكتب في الـ parent window عشان نعمل redirect حقيقي
+            try {{
+                window.parent.location.href = newUrl;
+            }} catch(e) {{
+                window.location.href = newUrl;
+            }}
+        }}
     }}, function(err) {{
         if (err.code === 1) {{
             document.getElementById('loc_status').style.display = 'none';
             document.getElementById('loc_denied').style.display = 'block';
         }} else if (err.code === 2) {{
-            document.getElementById('loc_status').innerHTML = '\u26a0\ufe0f Could not determine location \u2014 make sure GPS is on.';
+            document.getElementById('loc_status').innerHTML = '⚠️ Could not get location — make sure GPS is on.';
         }} else {{
-            document.getElementById('loc_status').innerHTML = '\u23f1 Location timed out \u2014 retrying...';
+            document.getElementById('loc_status').innerHTML = '⏱ Timed out — retrying...';
+            locationSent = false;
         }}
-    }}, {{enableHighAccuracy:true, timeout:15000, maximumAge:30000}});
+    }}, {{enableHighAccuracy:true, timeout:15000, maximumAge:0}});
 }}
+
+// شغّل فور ما الصفحة تفتح
 getAndSendLocation();
-setInterval(getAndSendLocation, 60000);
+
+// كل دقيقة يبعت تاني (reset الـ flag)
+setInterval(function() {{
+    locationSent = false;
+    getAndSendLocation();
+}}, 60000);
 </script>
 """
     st.components.v1.html(loc_html, height=140)
