@@ -239,11 +239,11 @@ if current_driver:
 
     if not online:
         st.title(f"⏸️ {current_driver}")
-        st.warning("أنت حالياً خارج الشيفت — مش وقت دوامك.")
+        st.warning("You are currently OFF SHIFT — not your working hours.")
         st.stop()
 
-    st.title(f"🚚 أهلاً، {current_driver}")
-    st.caption(f"📅 {now_saudi().strftime('%A %d/%m/%Y %H:%M')}")
+    st.title(f"🚚 Hello, {current_driver}!")
+    st.caption(f"📅 {now_saudi().strftime('%A %d/%m/%Y')}  |  🕐 {now_saudi().strftime('%H:%M')}")
 
     prev_entry = all_data[today].get(current_driver,{})
     prev_count = prev_entry.get("count",0)
@@ -320,20 +320,20 @@ setInterval(function() {{
     st.components.v1.html(loc_html, height=140)
 
     if prev_lat and prev_lng:
-        st.caption(f"\U0001f4cd Last saved location: {prev_lat}, {prev_lng} \u2014 {prev_entry.get('time','')}")
+        st.caption(f"📍 Last saved location: {prev_lat}, {prev_lng}  —  {prev_entry.get('time','')}")
 
     st.markdown("---")
-    st.subheader("\U0001f4e6 Enter your number of orders for today")
+    st.subheader("📦 Enter your number of orders for today")
     count = st.number_input("Orders", min_value=0, max_value=999, value=prev_count, step=1, label_visibility="collapsed")
 
-    if st.button("\u2705 Submit", use_container_width=True, type="primary"):
+    if st.button("✅ Submit", use_container_width=True, type="primary"):
         now_time = now_saudi().strftime("%H:%M")
         entry    = all_data[today].get(current_driver,{"count":0,"time":None,"history":[],"location_history":[]})
         history  = entry.get("history",[])
         history.append(now_time)
         all_data[today][current_driver] = {**entry,"count":count,"time":now_time,"history":history}
         save_json(DATA_FILE, all_data)
-        st.markdown('<div class="success-banner">\u2713 Submitted successfully! Manager can see your orders now.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="success-banner">✓ Submitted successfully! The manager can see your orders now.</div>', unsafe_allow_html=True)
         st.rerun()
 
     if prev_count > 0:
@@ -341,14 +341,14 @@ setInterval(function() {{
 
     history_list = all_data[today].get(current_driver,{}).get("history",[])
     if history_list:
-        st.caption(f"\U0001f550 Your updates today ({len(history_list)}): " + " \u00b7 ".join(history_list))
+        st.caption(f"🕐 Your updates today ({len(history_list)}): " + "  ·  ".join(history_list))
 
     st.markdown("---")
     st.markdown("""
     <div style='background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:10px 14px;font-size:.82rem;color:#856404;'>
-    \U0001f4cc <b>Keep this link handy:</b><br>
-    Android: Browser menu \u22ee \u2192 <b>Add to Home Screen</b><br>
-    iPhone: Safari \u2192 Share button \u2192 <b>Add to Home Screen</b>
+    📌 <b>Keep this link handy:</b><br>
+    Android: Browser menu ⋮ → <b>Add to Home Screen</b><br>
+    iPhone: Safari → Share button → <b>Add to Home Screen</b>
     </div>
     """, unsafe_allow_html=True)
     st.stop()
