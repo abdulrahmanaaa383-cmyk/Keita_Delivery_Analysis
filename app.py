@@ -31,9 +31,10 @@ def save_json(path, data):
 def get_today():
     return now_saudi().strftime("%Y-%m-%d")
 
-def get_driver_token(driver_name, day):
+# ── تعديل 1: توكن ثابت بناءً على اسم المندوب بس (بدون تاريخ) ──
+def get_driver_token(driver_name):
     import hashlib
-    return hashlib.md5(f"{driver_name}_{day}_secret_key_2025".encode()).hexdigest()[:10]
+    return hashlib.md5(f"{driver_name}_fixed_secret_key_2025".encode()).hexdigest()[:10]
 
 def minutes_since_update(time_str):
     if not time_str:
@@ -135,7 +136,8 @@ url_lng        = query_params.get("lng", None)
 current_driver = None
 if driver_token:
     for d in drivers_list:
-        if get_driver_token(d, today) == driver_token:
+        # ── تعديل 1: مقارنة بالتوكن الثابت بدون تاريخ ──
+        if get_driver_token(d) == driver_token:
             current_driver = d
             break
 
@@ -251,69 +253,98 @@ if current_driver:
     prev_lng   = prev_entry.get("lng","")
 
     base_url_clean   = config.get("base_url","").rstrip("/")
-    token_for_driver = get_driver_token(current_driver, today)
+    # ── تعديل 1: توكن ثابت بدون تاريخ ──
+    token_for_driver = get_driver_token(current_driver)
 
-    # ── JS بيطلب الموقع ويعمل redirect بالـ lat/lng في الـ URL ──
-    # الـ redirect هيخلي Streamlit يستقبل الموقع ويحفظه
+    # ── تعديل 2: JS بيطلب الموقع مرة واحدة بس (بيحفظ في localStorage إن الإذن اتأخد) ──
+    # لو الإذن اتأخد قبل كده هيفضل يبعت الموقع تلقائي بدون ما يطلب مرة تانية
     loc_html = f"""
 <div id="loc_status" style="background:#e8f8f0;border:1.5px solid #1D9E75;border-radius:10px;padding:12px 16px;margin:10px 0;font-size:.9rem;color:#155724;">
-    \u23f3 Getting your location...
+    ⏳ Checking location...
 </div>
 <div id="loc_denied" style="display:none;background:#fff3cd;border:1px solid #ffc107;border-radius:10px;padding:12px 16px;margin:10px 0;font-size:.85rem;color:#856404;">
-    \u26a0\ufe0f <b>Location access denied.</b><br><br>
-    <b>iPhone (Safari):</b> Settings \u2192 Safari \u2192 Location \u2192 Allow<br>
-    <b>Android (Chrome):</b> Tap the \U0001f512 lock icon \u2192 Permissions \u2192 Location \u2192 Allow<br><br>
+    ⚠️ <b>Location access denied.</b><br><br>
+    <b>iPhone (Safari):</b> Settings → Safari → Location → Allow<br>
+    <b>Android (Chrome):</b> Tap the 🔒 lock icon → Permissions → Location → Allow<br><br>
     Then <b>refresh the page</b>.
 </div>
 <script>
 var locationSent = false;
+var LOC_KEY = 'loc_granted_{token_for_driver}';
 
-function getAndSendLocation() {{
+function sendLocation(lat, lng, acc) {{
+    document.getElementById('loc_status').style.display = 'block';
+    document.getElementById('loc_denied').style.display = 'none';
+    document.getElementById('loc_status').innerHTML =
+        '✅ Location active — accuracy: ' + acc + 'm | 📍 ' + lat + ', ' + lng;
+
+    if (!locationSent) {{
+        locationSent = true;
+        var newUrl = '{base_url_clean}/?driver={token_for_driver}&lat=' + lat + '&lng=' + lng;
+        try {{
+            window.parent.location.href = newUrl;
+        }} catch(e) {{
+            window.location.href = newUrl;
+        }}
+    }}
+}}
+
+function getLocation() {{
     if (!navigator.geolocation) {{
         document.getElementById('loc_status').innerHTML = '❌ Browser does not support GPS.';
         return;
     }}
-    navigator.geolocation.getCurrentPosition(function(pos) {{
-        var lat = pos.coords.latitude.toFixed(6);
-        var lng = pos.coords.longitude.toFixed(6);
-        var acc = Math.round(pos.coords.accuracy);
 
-        document.getElementById('loc_status').style.display = 'block';
-        document.getElementById('loc_denied').style.display = 'none';
-        document.getElementById('loc_status').innerHTML =
-            '✅ Location active — accuracy: ' + acc + 'm | 📍 ' + lat + ', ' + lng;
+    // لو الإذن اتأخد قبل كده: اطلب الموقع مباشرة بدون popup
+    var alreadyGranted = localStorage.getItem(LOC_KEY) === 'yes';
 
-        // أول مرة: ابعت الموقع عن طريق reload للصفحة الأب
-        if (!locationSent) {{
-            locationSent = true;
-            var newUrl = '{base_url_clean}/?driver={token_for_driver}&lat=' + lat + '&lng=' + lng;
-            // بنكتب في الـ parent window عشان نعمل redirect حقيقي
-            try {{
-                window.parent.location.href = newUrl;
-            }} catch(e) {{
-                window.location.href = newUrl;
+    if (alreadyGranted) {{
+        // اطلب الموقع بهدوء
+        navigator.geolocation.getCurrentPosition(function(pos) {{
+            var lat = pos.coords.latitude.toFixed(6);
+            var lng = pos.coords.longitude.toFixed(6);
+            var acc = Math.round(pos.coords.accuracy);
+            sendLocation(lat, lng, acc);
+        }}, function(err) {{
+            // لو الإذن اتسحب
+            if (err.code === 1) {{
+                localStorage.removeItem(LOC_KEY);
+                document.getElementById('loc_status').style.display = 'none';
+                document.getElementById('loc_denied').style.display = 'block';
+            }} else {{
+                document.getElementById('loc_status').innerHTML = '⚠️ Could not get location — make sure GPS is on.';
             }}
-        }}
-    }}, function(err) {{
-        if (err.code === 1) {{
-            document.getElementById('loc_status').style.display = 'none';
-            document.getElementById('loc_denied').style.display = 'block';
-        }} else if (err.code === 2) {{
-            document.getElementById('loc_status').innerHTML = '⚠️ Could not get location — make sure GPS is on.';
-        }} else {{
-            document.getElementById('loc_status').innerHTML = '⏱ Timed out — retrying...';
-            locationSent = false;
-        }}
-    }}, {{enableHighAccuracy:true, timeout:15000, maximumAge:0}});
+        }}, {{enableHighAccuracy:true, timeout:15000, maximumAge:0}});
+    }} else {{
+        // أول مرة: اطلب الإذن
+        navigator.geolocation.getCurrentPosition(function(pos) {{
+            // حفظ إن الإذن اتأخد
+            try {{ localStorage.setItem(LOC_KEY, 'yes'); }} catch(e) {{}}
+            var lat = pos.coords.latitude.toFixed(6);
+            var lng = pos.coords.longitude.toFixed(6);
+            var acc = Math.round(pos.coords.accuracy);
+            sendLocation(lat, lng, acc);
+        }}, function(err) {{
+            if (err.code === 1) {{
+                document.getElementById('loc_status').style.display = 'none';
+                document.getElementById('loc_denied').style.display = 'block';
+            }} else if (err.code === 2) {{
+                document.getElementById('loc_status').innerHTML = '⚠️ Could not get location — make sure GPS is on.';
+            }} else {{
+                document.getElementById('loc_status').innerHTML = '⏱ Timed out — retrying...';
+                locationSent = false;
+            }}
+        }}, {{enableHighAccuracy:true, timeout:15000, maximumAge:0}});
+    }}
 }}
 
 // شغّل فور ما الصفحة تفتح
-getAndSendLocation();
+getLocation();
 
-// كل دقيقة يبعت تاني (reset الـ flag)
+// كل دقيقة يبعت الموقع تاني (بدون popup لأن الإذن اتأخد)
 setInterval(function() {{
     locationSent = false;
-    getAndSendLocation();
+    getLocation();
 }}, 60000);
 </script>
 """
@@ -688,7 +719,8 @@ with tab3:
 # تاب 4: روابط المناديب
 # ==================================================================================
 with tab4:
-    st.info("⚠️ الروابط بتتغير كل يوم — ابعتها كل صباح.")
+    # ── تعديل 1: اللينك ثابت — مش بيتغير كل يوم ──
+    st.success("✅ الروابط دي ثابتة ومش بتتغير — ابعتها مرة واحدة بس لكل مندوب.")
     saved_url = config.get("base_url","https://keitadeliveryanalysis-6zvs3tjytsugs3yweiq2s6.streamlit.app")
     base_url  = st.text_input("🌐 رابط الموقع الأساسي",value=saved_url)
     if st.button("💾 حفظ الرابط",type="secondary"):
@@ -697,18 +729,19 @@ with tab4:
         st.success("✅ تم حفظ الرابط!")
 
     st.markdown("---")
-    st.markdown("### روابط اليوم")
+    st.markdown("### روابط المناديب (ثابتة)")
     for driver in drivers_list:
-        token     = get_driver_token(driver,today)
+        # ── تعديل 1: توكن ثابت بدون تاريخ ──
+        token     = get_driver_token(driver)
         full_link = f"{base_url}?driver={token}"
         cn,cl = st.columns([2,5])
         with cn: st.write(f"**{driver}**")
         with cl: st.markdown(f'<div class="link-box">{full_link}</div>',unsafe_allow_html=True)
 
     st.markdown("---")
-    wa_msg = f"🚚 *تقرير الطلبات - {now_saudi().strftime('%d/%m/%Y')}*\n\nكل مندوب يفتح رابطه:\n\n"
+    wa_msg = f"🚚 *روابط المناديب — ثابتة يوميا*\n\nكل مندوب يفتح رابطه ويحطه على الهوم سكرين:\n\n"
     for driver in drivers_list:
-        wa_msg += f"▫️ {driver}: {base_url}?driver={get_driver_token(driver,today)}\n"
+        wa_msg += f"▫️ {driver}: {base_url}?driver={get_driver_token(driver)}\n"
     st.text_area("رسالة واتساب",wa_msg,height=260)
 
 # ==================================================================================
