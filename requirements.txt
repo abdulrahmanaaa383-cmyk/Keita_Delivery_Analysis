@@ -6,3 +6,5 @@ google-auth>=2.30
 bcrypt>=4.1
 plotly>=5.22
 PyYAML>=6.0
+requests>=2.32
+streamlit-autorefresh>=1.0.1
