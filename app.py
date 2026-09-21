@@ -738,34 +738,3 @@ with tabs[4]:
             db_delete_order(del_id)
             st.success("تم الحذف")
             st.rerun()
-
-
-streamlit>=1.36
-pandas>=2.0
-openpyxl>=3.1
-gspread>=6.1
-google-auth>=2.30
-bcrypt>=4.1
-plotly>=5.22
-PyYAML>=6.0
-
-
-# ⚠️ غيّر الباسوردات دي فوراً بعد أول تسجيل دخول!
-# باسورد admin الافتراضي: admin123
-# باسورد member1 الافتراضي: member123
-#
-# عشان تولّد باسورد جديد، شغّل السطرين دول في أي بيئة بايثون فيها bcrypt مثبتة:
-#   import bcrypt
-#   print(bcrypt.hashpw(b"الباسورد_الجديد", bcrypt.gensalt()).decode())
-# وانسخ الناتج بدل الـ hash القديم تحت.
-
-credentials:
-  usernames:
-    admin:
-      name: "المدير"
-      password: "$2b$12$UxP1aBp7Sy0xifCQttut4Olw8bwqcD0Qtmrb6iDcJkmqvY/BoXnzO"
-      role: admin
-    member1:
-      name: "عضو الفريق 1"
-      password: "$2b$12$9vYpOLT8BrUhPjFVWzF4jum0OOwiUUV0VkfgbhbsnacKOtldS6frq"
-      role: member
