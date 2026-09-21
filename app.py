@@ -10,7 +10,8 @@
 الأقسام في الملف ده (دور عليها بالتعليقات الكبيرة):
   1) DATABASE (SQLite)          — تخزين المناديب والطلبات
   2) AUTH                       — تسجيل الدخول والصلاحيات
-  3) HUNGER STATION API CLIENT  — المكان الوحيد اللي هتفعّله لما توصلك بيانات الـ API
+  3) HUNGER STATION API CLIENT  — لما يوصلك API رسمي من هنجر ستيشن
+  3B) LIVE SCRAPER               — حل مؤقت: دخول بحسابك وسحب البيانات لايف
   4) GOOGLE SHEETS SYNC         — تغذية Looker Studio
   5) ANALYSIS                   — كل حسابات الأداء
   6) EXCEL EXPORT                — تصدير كل التقارير في ملف واحد
@@ -28,6 +29,12 @@ import streamlit as st
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+
+try:
+    from streamlit_autorefresh import st_autorefresh
+    AUTOREFRESH_AVAILABLE = True
+except ImportError:
+    AUTOREFRESH_AVAILABLE = False
 import plotly.express as px
 
 st.set_page_config(page_title="Rider Tracker", page_icon="🛵", layout="wide")
@@ -290,6 +297,125 @@ class HungerStationClient:
 
 
 # ════════════════════════════════════════════════════════════════════════
+# 3B) LIVE SCRAPER — تسجيل دخول بحسابك على هنجر ستيشن وسحب بياناته "لايف"
+#     (بديل مؤقت لغاية ما يوصلك API رسمي). كل حاجة هنا بتتظبط من الواجهة
+#     نفسها (روابط + مابينج) من غير ما تحتاج تعدّل كود.
+# ════════════════════════════════════════════════════════════════════════
+import requests
+import json as _json
+
+
+class HungerStationScraper:
+    """
+    Session-based scraper بيدخل بحسابك (username/password) على أي صفحة لوجن،
+    وبعدين يجيب بيانات من endpoint معيّن باستخدام نفس الـ session/cookies.
+
+    ملحوظة مهمة: أنا معنديش وصول لموقع هنجر ستيشن، فمش أقدر أحدد الروابط
+    الحقيقية (login_url / data_url) ولا شكل الفورم بالظبط. انت هتجيبهم بنفسك
+    بخطوات بسيطة (موضحة في تبويب "لايف من هنجر ستيشن" داخل السيستم):
+      1) افتح صفحة تسجيل الدخول بتاعة هنجر ستيشن في المتصفح.
+      2) دوس F12 (أو Cmd+Option+I على ماك) → افتح تبويب Network.
+      3) سجّل الدخول بحسابك العادي وراقب الطلبات اللي بتظهر.
+      4) دور على الطلب اللي بيتبعت لما تدوس "تسجيل الدخول" (عادة POST) —
+         ده الـ login_url، وشوف اسم حقول اليوزر والباسورد فيه (username_field/password_field).
+      5) بعد الدخول، دور في الصفحة اللي فيها المناديب/الطلبات على الطلب اللي
+         بيرجع البيانات (عادة XHR/Fetch وبيرجع JSON) — ده الـ data_url.
+      6) انسخ الروابط دي وحطها في السيستم من تبويب "الاتصال".
+    """
+
+    def __init__(self, login_url: str, username_field: str, password_field: str,
+                 username: str, password: str, extra_login_fields: dict = None):
+        self.login_url = login_url
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
+        self.username_field = username_field
+        self.password_field = password_field
+        self.username = username
+        self.password = password
+        self.extra_login_fields = extra_login_fields or {}
+        self.logged_in = False
+
+    def login(self) -> tuple:
+        """يرجع (success: bool, message: str)."""
+        try:
+            payload = {
+                self.username_field: self.username,
+                self.password_field: self.password,
+                **self.extra_login_fields,
+            }
+            resp = self.session.post(self.login_url, data=payload, timeout=20, allow_redirects=True)
+            if resp.status_code >= 400:
+                return False, f"فشل تسجيل الدخول — كود الاستجابة: {resp.status_code}"
+            self.logged_in = True
+            return True, "تم تسجيل الدخول بنجاح"
+        except Exception as e:
+            return False, f"خطأ أثناء الاتصال: {e}"
+
+    def login_via_bearer_or_cookie(self, token_or_cookie: str, header_name: str = "Authorization",
+                                    is_cookie: bool = False):
+        """
+        لو هنجر بتستخدم توكن جاهز (نسخته من الـ DevTools بعد ما دخلت يدوي) بدل
+        فورم لوجن كامل — استخدم الدالة دي بدل login() العادية.
+        """
+        if is_cookie:
+            self.session.headers.update({"Cookie": token_or_cookie})
+        else:
+            self.session.headers.update({header_name: token_or_cookie})
+        self.logged_in = True
+
+    def fetch_raw(self, data_url: str, method: str = "GET", params: dict = None, body: dict = None) -> dict:
+        if not self.logged_in:
+            raise RuntimeError("لازم تسجل دخول الأول (login) قبل ما تجيب البيانات.")
+        if method.upper() == "GET":
+            resp = self.session.get(data_url, params=params, timeout=20)
+        else:
+            resp = self.session.post(data_url, json=body, params=params, timeout=20)
+        resp.raise_for_status()
+        return resp.json()
+
+
+def get_by_path(obj, path: str):
+    """
+    استخراج قيمة من JSON متداخل باستخدام مسار بنقط، زي: 'courier.name' أو 'data.orders'.
+    بيرجع None لو المسار مش موجود، بدل ما يعمل كراش.
+    """
+    if not path:
+        return None
+    cur = obj
+    for part in path.split("."):
+        if isinstance(cur, dict):
+            cur = cur.get(part)
+        elif isinstance(cur, list) and part.isdigit():
+            idx = int(part)
+            cur = cur[idx] if idx < len(cur) else None
+        else:
+            return None
+    return cur
+
+
+def apply_mapping(raw_json: dict, list_path: str, field_map: dict) -> list:
+    """
+    list_path: المسار لمكان الليستة جوه الـ JSON (مثال: 'data.orders'، سيبه فاضي
+               لو الـ JSON نفسه عبارة عن ليستة).
+    field_map: dict فيه المفتاح عندنا (order_id, rider_name, ...) وقيمته هي اسم
+               الحقل المقابل جوه كل عنصر في هنجر (يقبل نقط للحقول المتداخلة زي 'courier.name').
+    """
+    items = get_by_path(raw_json, list_path) if list_path else raw_json
+    if not isinstance(items, list):
+        return []
+    rows = []
+    for it in items:
+        row = {}
+        for our_key, their_key in field_map.items():
+            if their_key:
+                row[our_key] = get_by_path(it, their_key)
+        rows.append(row)
+    return rows
+
+
+# ════════════════════════════════════════════════════════════════════════
 # 4) GOOGLE SHEETS SYNC — تغذية Looker Studio
 # ════════════════════════════════════════════════════════════════════════
 def sheets_is_configured() -> bool:
@@ -533,7 +659,8 @@ if status_filter:
 
 st.title("🛵 نظام تراكنج المناديب")
 
-tabs = st.tabs(["📊 الداشبورد", "➕ إدخال / استيراد", "🏍️ المناديب", "📤 التصدير والمزامنة", "⚙️ الإعدادات"])
+tabs = st.tabs(["📊 الداشبورد", "🔴 لايف من هنجر ستيشن", "➕ إدخال / استيراد",
+                "🏍️ المناديب", "📤 التصدير والمزامنة", "⚙️ الإعدادات"])
 
 # ── TAB 1: Dashboard ──────────────────────────────────────────────────────
 with tabs[0]:
@@ -567,8 +694,195 @@ with tabs[0]:
         for line in auto_insights(all_orders, r_sum, d_sum):
             st.markdown(f"- {line}")
 
-# ── TAB 2: Data entry / import ───────────────────────────────────────────
+# ── TAB "لايف من هنجر ستيشن": سكرابينج بحسابك + عرض لايف بتنسيق مختلف ──────
 with tabs[1]:
+    st.markdown("### 🔴 سحب البيانات لايف من حسابك على هنجر ستيشن")
+    st.caption(
+        "بديل مؤقت لغاية ما يوصلك API رسمي: بتسجل دخول بحسابك، والسيستم يسحب "
+        "البيانات ويعرضها هنا بشكل لايف وتنسيق مختلف عن تبويب الداشبورد."
+    )
+
+    live_sub1, live_sub2, live_sub3 = st.tabs(["1️⃣ الاتصال", "2️⃣ ربط الحقول (Mapping)", "3️⃣ اللايف تراكنج"])
+
+    # -- تهيئة session_state --
+    for k, v in [("hs_login_url", ""), ("hs_data_url", ""), ("hs_username_field", "username"),
+                 ("hs_password_field", "password"), ("hs_username", ""), ("hs_password", ""),
+                 ("hs_list_path", ""), ("hs_field_map", {}), ("hs_sample_json", ""),
+                 ("hs_scraper", None), ("hs_last_raw", None)]:
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+    # ── 1) الاتصال ──────────────────────────────────────────────────────
+    with live_sub1:
+        with st.expander("📖 إزاي تجيب الروابط دي؟ (خطوة بخطوة)", expanded=False):
+            st.markdown("""
+1. افتح صفحة تسجيل الدخول بتاعة هنجر ستيشن على المتصفح (كروم مثلاً).
+2. دوس **F12** لفتح أدوات المطوّر، وروح لتبويب **Network**.
+3. سجّل دخول بحسابك العادي زي ما بتعمل دايماً.
+4. هتلاقي طلب باسم شبه login أو auth أو signin — دوس عليه وشوف:
+   - الرابط (Request URL) → ده الـ **login_url**
+   - في تبويب Payload/Form Data هتلاقي أسماء الحقول (زي email أو username) → دول الـ **username_field / password_field**
+5. بعد الدخول، روح لصفحة تتابع فيها المناديب/الطلبات، ودوّر في Network على طلب
+   من نوع **Fetch/XHR** بيرجع بيانات (مش صورة ولا CSS) → ده الـ **data_url**.
+6. لو الموقع بيستخدم Token/Bearer بدل يوزر وباسورد عادي (هتلاقيه في تبويب Headers
+   باسم Authorization)، استخدم خيار "عندي Token/Cookie جاهز" تحت بدل تسجيل الدخول العادي.
+
+⚠️ لو الموقع فيه CAPTCHA أو رمز تحقق (OTP/2FA)، الطريقة دي مش هتشتغل من غير تدخل يدوي.
+            """)
+
+        conn_mode = st.radio("طريقة الدخول", ["يوزر وباسورد عادي", "عندي Token/Cookie جاهز"], horizontal=True)
+
+        if conn_mode == "يوزر وباسورد عادي":
+            c1, c2 = st.columns(2)
+            st.session_state["hs_login_url"] = c1.text_input("Login URL", value=st.session_state["hs_login_url"])
+            st.session_state["hs_data_url"] = c2.text_input("Data URL (رابط البيانات بعد الدخول)", value=st.session_state["hs_data_url"])
+            c3, c4 = st.columns(2)
+            st.session_state["hs_username_field"] = c3.text_input("اسم حقل اليوزر في الفورم", value=st.session_state["hs_username_field"])
+            st.session_state["hs_password_field"] = c4.text_input("اسم حقل الباسورد في الفورم", value=st.session_state["hs_password_field"])
+            c5, c6 = st.columns(2)
+            st.session_state["hs_username"] = c5.text_input("اليوزر/الإيميل بتاعك في هنجر ستيشن")
+            st.session_state["hs_password"] = c6.text_input("الباسورد بتاعك في هنجر ستيشن", type="password")
+
+            st.caption("🔒 الباسورد بيتخزن في الذاكرة المؤقتة بس (session) ومش بيتحفظ في قاعدة البيانات ولا أي ملف.")
+
+            if st.button("🔌 اتصل وسجّل دخول"):
+                scraper = HungerStationScraper(
+                    login_url=st.session_state["hs_login_url"],
+                    username_field=st.session_state["hs_username_field"],
+                    password_field=st.session_state["hs_password_field"],
+                    username=st.session_state["hs_username"],
+                    password=st.session_state["hs_password"],
+                )
+                ok, msg = scraper.login()
+                if ok:
+                    st.session_state["hs_scraper"] = scraper
+                    st.success(f"✅ {msg}")
+                else:
+                    st.error(f"❌ {msg}")
+        else:
+            c1, c2 = st.columns(2)
+            st.session_state["hs_data_url"] = c1.text_input("Data URL", value=st.session_state["hs_data_url"])
+            token_val = c2.text_input("Token أو Cookie كامل (زي ما ظهر في DevTools)", type="password")
+            is_cookie = st.checkbox("ده Cookie مش Bearer Token")
+            if st.button("🔌 استخدم الـ Token/Cookie ده"):
+                scraper = HungerStationScraper(login_url="", username_field="", password_field="",
+                                                username="", password="")
+                scraper.login_via_bearer_or_cookie(token_val, is_cookie=is_cookie)
+                st.session_state["hs_scraper"] = scraper
+                st.success("✅ تم الحفظ — جرّب تجيب عينة بيانات في التبويب الجاي")
+
+    # ── 2) Mapping ──────────────────────────────────────────────────────
+    with live_sub2:
+        scraper = st.session_state.get("hs_scraper")
+        if not scraper or not scraper.logged_in:
+            st.info("سجّل الدخول الأول من تبويب 'الاتصال'.")
+        else:
+            if st.button("📡 اجلب عينة بيانات الآن (Test Fetch)"):
+                try:
+                    raw = scraper.fetch_raw(st.session_state["hs_data_url"])
+                    st.session_state["hs_last_raw"] = raw
+                    st.success("✅ اتجابت البيانات، شوفها تحت وابني المابينج عليها")
+                except Exception as e:
+                    st.error(f"❌ فشل الجلب: {e}")
+
+            if st.session_state.get("hs_last_raw") is not None:
+                with st.expander("👁️ شكل الـ JSON الراجع (عشان تبني المابينج عليه)", expanded=True):
+                    st.json(st.session_state["hs_last_raw"], expanded=False)
+
+                st.session_state["hs_list_path"] = st.text_input(
+                    "مسار الليستة جوه الـ JSON (سيبه فاضي لو الـ JSON نفسه ليستة)",
+                    value=st.session_state["hs_list_path"],
+                    placeholder="مثال: data.orders"
+                )
+
+                st.markdown("**اربط كل حقل عندنا بالحقل المقابل في هنجر ستيشن:**")
+                target_fields = ["order_id", "rider_id", "rider_name", "order_date", "order_time",
+                                  "pickup_area", "drop_area", "distance_km", "order_value", "status"]
+                fmap = st.session_state["hs_field_map"]
+                cols = st.columns(2)
+                for i, tf in enumerate(target_fields):
+                    fmap[tf] = cols[i % 2].text_input(f"حقلنا: {tf}", value=fmap.get(tf, ""), key=f"map_{tf}",
+                                                       placeholder="مثال: courier.name")
+                st.session_state["hs_field_map"] = fmap
+
+                if st.button("✅ اختبر المابينج على العينة"):
+                    rows = apply_mapping(st.session_state["hs_last_raw"], st.session_state["hs_list_path"], fmap)
+                    if rows:
+                        st.success(f"✅ اتحول {len(rows)} صف بنجاح — شوف النتيجة تحت")
+                        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+                    else:
+                        st.warning("مفيش صفوف طلعت — راجع list_path والمابينج.")
+
+    # ── 3) Live tracking view ───────────────────────────────────────────
+    with live_sub3:
+        scraper = st.session_state.get("hs_scraper")
+        if not scraper or not scraper.logged_in or not st.session_state["hs_field_map"]:
+            st.info("لازم تخلّص خطوة 'الاتصال' و'ربط الحقول' الأول.")
+        else:
+            auto = st.checkbox("🔄 تحديث تلقائي كل 30 ثانية", value=False)
+            if auto and AUTOREFRESH_AVAILABLE:
+                st_autorefresh(interval=30_000, key="hs_live_refresh")
+            elif auto and not AUTOREFRESH_AVAILABLE:
+                st.caption("⚠️ لتفعيل التحديث التلقائي ضيف `streamlit-autorefresh` في requirements.txt")
+
+            colA, colB = st.columns([1, 3])
+            with colA:
+                manual_refresh = st.button("🔄 تحديث الآن")
+            with colB:
+                st.caption(f"آخر تحديث: {datetime.now().strftime('%H:%M:%S')}")
+
+            if manual_refresh or auto:
+                try:
+                    raw = scraper.fetch_raw(st.session_state["hs_data_url"])
+                    rows = apply_mapping(raw, st.session_state["hs_list_path"], st.session_state["hs_field_map"])
+                    # تنضيف بسيط قبل الحفظ
+                    clean_rows = []
+                    for r in rows:
+                        if not r.get("order_id"):
+                            continue
+                        r["distance_km"] = float(r.get("distance_km") or 0)
+                        r["order_value"] = float(r.get("order_value") or 0)
+                        r.setdefault("order_date", date.today().isoformat())
+                        r.setdefault("status", "delivered")
+                        r["source"] = "hunger_station_live"
+                        clean_rows.append(r)
+                    if clean_rows:
+                        db_upsert_orders(clean_rows)
+                        db_log_sync("hunger_station_live", len(clean_rows), "success")
+                    st.session_state["hs_live_rows"] = clean_rows
+                except Exception as e:
+                    st.error(f"❌ فشل التحديث: {e}")
+                    db_log_sync("hunger_station_live", 0, "error", str(e))
+
+            live_rows = st.session_state.get("hs_live_rows", [])
+            st.markdown(f"#### 🟢 لايف — {len(live_rows)} طلب في آخر سحب")
+
+            # تنسيق مختلف تماماً عن تبويب الداشبورد: فييد لايف بكروت متحركة
+            for r in live_rows[:30]:
+                st.markdown(f"""
+                <div style="display:flex;align-items:center;justify-content:space-between;
+                    background:linear-gradient(90deg,#0f172a,#111827);border:1px solid #1e293b;
+                    border-radius:12px;padding:12px 18px;margin-bottom:8px;">
+                  <div style="display:flex;align-items:center;gap:10px;">
+                    <span style="width:8px;height:8px;border-radius:50%;background:#22c55e;
+                        display:inline-block;animation:pulse 1.5s infinite;"></span>
+                    <div>
+                      <div style="color:#fff;font-weight:700;">{r.get('rider_name','—')}</div>
+                      <div style="color:#94a3b8;font-size:12px;">طلب #{r.get('order_id','—')} · {r.get('order_time','—')}</div>
+                    </div>
+                  </div>
+                  <div style="display:flex;gap:20px;">
+                    <div style="text-align:center;"><div style="color:#64748b;font-size:10px;">كم</div>
+                        <div style="color:#60a5fa;font-weight:700;">{r.get('distance_km','—')}</div></div>
+                    <div style="text-align:center;"><div style="color:#64748b;font-size:10px;">القيمة</div>
+                        <div style="color:#4ade80;font-weight:700;">{r.get('order_value','—')}</div></div>
+                  </div>
+                </div>
+                <style>@keyframes pulse {{0%{{opacity:1}}50%{{opacity:.3}}100%{{opacity:1}}}}</style>
+                """, unsafe_allow_html=True)
+
+# ── TAB 2: Data entry / import ───────────────────────────────────────────
+with tabs[2]:
     st.markdown("### طريقة إضافة البيانات دلوقتي")
     st.caption("لغاية ما يوصلك API هنجر ستيشن، تقدر تضيف الطلبات يدوي أو تستورد ملف Excel/CSV دفعة واحدة.")
 
@@ -649,7 +963,7 @@ with tabs[1]:
                     st.error(f"❌ فشلت المزامنة: {e}")
 
 # ── TAB 3: Riders management ──────────────────────────────────────────────
-with tabs[2]:
+with tabs[3]:
     st.subheader("🏍️ إدارة المناديب")
     st.dataframe(all_riders_df, use_container_width=True)
 
@@ -686,7 +1000,7 @@ with tabs[2]:
         st.caption("إضافة/حذف المناديب متاح للأدمن فقط.")
 
 # ── TAB 4: Export & sync ──────────────────────────────────────────────────
-with tabs[3]:
+with tabs[4]:
     st.subheader("📤 تصدير كل التقارير مرة واحدة")
     st.caption("بيطلع ملف Excel واحد فيه: ملخص عام، أداء المناديب، ملخص يومي، تفاصيل الطلبات، وتحليل تلقائي.")
 
@@ -724,7 +1038,7 @@ with tabs[3]:
     st.dataframe(db_get_sync_log(), use_container_width=True)
 
 # ── TAB 5: Settings ────────────────────────────────────────────────────────
-with tabs[4]:
+with tabs[5]:
     require_admin()
     st.subheader("⚙️ الإعدادات")
     st.markdown("""
