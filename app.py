@@ -1,817 +1,771 @@
-import streamlit as st
-import anthropic
-import base64
-import json
-import pandas as pd
+"""
+🛵 Rider Tracker — نظام تراكنج المناديب (ملف واحد)
+=====================================================
+كل السيستم في ملف بايثون واحد عشان سهل رفعه على Streamlit Community Cloud.
+محتاج جنبه في نفس الـ repo:
+  - requirements.txt
+  - users.yaml               (بيانات تسجيل الدخول)
+  - .streamlit/secrets.toml  (مفاتيح Hunger Station API + Google Sheets — تضيفها لما تجهز)
+
+الأقسام في الملف ده (دور عليها بالتعليقات الكبيرة):
+  1) DATABASE (SQLite)          — تخزين المناديب والطلبات
+  2) AUTH                       — تسجيل الدخول والصلاحيات
+  3) HUNGER STATION API CLIENT  — المكان الوحيد اللي هتفعّله لما توصلك بيانات الـ API
+  4) GOOGLE SHEETS SYNC         — تغذية Looker Studio
+  5) ANALYSIS                   — كل حسابات الأداء
+  6) EXCEL EXPORT                — تصدير كل التقارير في ملف واحد
+  7) STREAMLIT UI                — الواجهة نفسها
+"""
+
+import sqlite3
+import io
 from io import BytesIO
-from datetime import datetime
+from pathlib import Path
+from datetime import date, datetime, timedelta
+
+import pandas as pd
+import streamlit as st
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-from PIL import Image
-import io
+import plotly.express as px
 
-st.set_page_config(
-    page_title="Rider Performance Tracker",
-    page_icon="🛵",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
+st.set_page_config(page_title="Rider Tracker", page_icon="🛵", layout="wide")
 
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
-
-*, html, body, [class*="css"] {
-  font-family: 'Inter', sans-serif !important;
-  box-sizing: border-box;
-}
-
-/* ── dark background ── */
-.stApp { background: #080b14 !important; }
-section[data-testid="stSidebar"] { background: #0d1020 !important; }
-.block-container { padding: 0 !important; max-width: 100% !important; }
-
-/* ── hide streamlit chrome ── */
-#MainMenu, footer, header { visibility: hidden; }
-.stDeployButton { display: none; }
-
-/* ── top navbar ── */
-.navbar {
-  background: linear-gradient(90deg, #0d1020 0%, #111827 100%);
-  border-bottom: 1px solid #1e2540;
-  padding: 14px 32px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  position: sticky;
-  top: 0;
-  z-index: 999;
-}
-.navbar-brand { display: flex; align-items: center; gap: 12px; }
-.navbar-brand span { font-size: 22px; font-weight: 800; color: #fff; letter-spacing: -.5px; }
-.navbar-brand .dot { color: #6366f1; }
-.navbar-badge {
-  background: #1e2540;
-  border: 1px solid #2a3050;
-  border-radius: 20px;
-  padding: 4px 14px;
-  font-size: 12px;
-  color: #8b92b0;
-  font-weight: 500;
-}
-.navbar-right { display: flex; gap: 10px; align-items: center; }
-
-/* ── main content wrapper ── */
-.dash-wrap { padding: 24px 32px; }
-
-/* ── section title ── */
-.sec-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: #6366f1;
-  text-transform: uppercase;
-  letter-spacing: .1em;
-  margin: 28px 0 14px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.sec-title::after {
-  content: '';
-  flex: 1;
-  height: 1px;
-  background: linear-gradient(90deg, #1e2540, transparent);
-}
-
-/* ── metric cards ── */
-.metrics-grid {
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 14px;
-  margin-bottom: 8px;
-}
-.metric-card {
-  background: linear-gradient(135deg, #111827 0%, #0d1020 100%);
-  border: 1px solid #1e2540;
-  border-radius: 14px;
-  padding: 20px 18px;
-  position: relative;
-  overflow: hidden;
-  transition: border-color .2s, transform .15s;
-}
-.metric-card:hover { border-color: #6366f1; transform: translateY(-2px); }
-.metric-card::before {
-  content: '';
-  position: absolute;
-  top: 0; left: 0; right: 0;
-  height: 3px;
-  background: var(--accent, #6366f1);
-  border-radius: 14px 14px 0 0;
-}
-.mc-icon { font-size: 22px; margin-bottom: 10px; }
-.mc-label { font-size: 11px; font-weight: 600; color: #6b7280; text-transform: uppercase; letter-spacing: .08em; }
-.mc-value { font-size: 32px; font-weight: 800; color: #fff; margin: 4px 0 2px; line-height: 1; }
-.mc-sub { font-size: 12px; color: var(--accent, #6366f1); font-weight: 500; }
-
-/* ── upload panel ── */
-.upload-panel {
-  background: #0d1020;
-  border: 1px solid #1e2540;
-  border-radius: 16px;
-  padding: 24px;
-  margin-bottom: 20px;
-}
-.paste-zone {
-  background: #111827;
-  border: 2px dashed #2a3050;
-  border-radius: 12px;
-  padding: 32px 24px;
-  text-align: center;
-  cursor: pointer;
-  transition: border-color .2s, background .2s;
-  margin-bottom: 16px;
-  position: relative;
-}
-.paste-zone:hover { border-color: #6366f1; background: #131929; }
-.paste-zone-icon { font-size: 36px; margin-bottom: 10px; }
-.paste-zone-text { color: #6b7280; font-size: 14px; }
-.paste-zone-text strong { color: #a5b4fc; }
-.paste-preview {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-  gap: 10px;
-  margin-top: 16px;
-}
-.paste-thumb {
-  border-radius: 8px;
-  border: 1px solid #1e2540;
-  overflow: hidden;
-  aspect-ratio: 16/9;
-  background: #111827;
-}
-.paste-thumb img { width: 100%; height: 100%; object-fit: cover; }
-
-div[data-testid="stFileUploader"] {
-  background: transparent !important;
-  border: none !important;
-  padding: 0 !important;
-}
-div[data-testid="stFileUploader"] > div {
-  background: #111827 !important;
-  border: 2px dashed #2a3050 !important;
-  border-radius: 12px !important;
-  padding: 24px !important;
-}
-div[data-testid="stFileUploader"] label { color: #6b7280 !important; }
-
-/* ── buttons ── */
-div.stButton > button {
-  background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%) !important;
-  color: white !important;
-  border: none !important;
-  border-radius: 10px !important;
-  padding: 12px 28px !important;
-  font-weight: 600 !important;
-  font-size: 14px !important;
-  width: 100% !important;
-  letter-spacing: .02em !important;
-  transition: opacity .2s, transform .15s !important;
-  box-shadow: 0 4px 15px rgba(99,102,241,.3) !important;
-}
-div.stButton > button:hover {
-  opacity: .9 !important;
-  transform: translateY(-1px) !important;
-}
-
-/* ── API key input ── */
-div[data-testid="stTextInput"] input {
-  background: #111827 !important;
-  border: 1px solid #1e2540 !important;
-  border-radius: 10px !important;
-  color: #fff !important;
-  padding: 10px 14px !important;
-  font-size: 14px !important;
-}
-div[data-testid="stTextInput"] input:focus {
-  border-color: #6366f1 !important;
-  box-shadow: 0 0 0 3px rgba(99,102,241,.15) !important;
-}
-div[data-testid="stTextInput"] label { color: #6b7280 !important; font-size: 12px !important; font-weight: 600 !important; text-transform: uppercase !important; letter-spacing: .08em !important; }
-
-/* ── text area (paste) ── */
-div[data-testid="stTextArea"] textarea {
-  background: #111827 !important;
-  border: 2px dashed #2a3050 !important;
-  border-radius: 12px !important;
-  color: #fff !important;
-  font-size: 14px !important;
-  min-height: 120px !important;
-}
-
-/* ── rider table ── */
-.rider-table {
-  background: #0d1020;
-  border: 1px solid #1e2540;
-  border-radius: 16px;
-  overflow: hidden;
-}
-.rt-header {
-  display: grid;
-  grid-template-columns: 200px 80px 120px 80px 100px 100px 110px 110px 120px;
-  background: #111827;
-  border-bottom: 1px solid #1e2540;
-  padding: 12px 20px;
-}
-.rt-hcell {
-  font-size: 11px;
-  font-weight: 600;
-  color: #6b7280;
-  text-transform: uppercase;
-  letter-spacing: .08em;
-}
-.rt-row {
-  display: grid;
-  grid-template-columns: 200px 80px 120px 80px 100px 100px 110px 110px 120px;
-  padding: 14px 20px;
-  border-bottom: 1px solid #0f1526;
-  align-items: center;
-  transition: background .15s;
-}
-.rt-row:hover { background: #111827; }
-.rt-row:last-child { border-bottom: none; }
-.rt-cell { font-size: 13px; color: #cbd5e1; }
-.rt-name { font-weight: 600; color: #fff; font-size: 14px; }
-.rt-id { font-size: 11px; color: #6b7280; margin-top: 2px; }
-
-/* ── badges ── */
-.badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  border-radius: 20px;
-  padding: 3px 10px;
-  font-size: 11px;
-  font-weight: 600;
-}
-.badge-working { background: rgba(74,222,128,.1); color: #4ade80; border: 1px solid rgba(74,222,128,.2); }
-.badge-offline { background: rgba(248,113,113,.1); color: #f87171; border: 1px solid rgba(248,113,113,.2); }
-.badge-idle    { background: rgba(251,191,36,.1);  color: #fbbf24; border: 1px solid rgba(251,191,36,.2); }
-
-/* ── value colors ── */
-.val-green  { color: #4ade80; font-weight: 700; }
-.val-yellow { color: #fbbf24; font-weight: 700; }
-.val-blue   { color: #60a5fa; font-weight: 700; }
-.val-white  { color: #fff;    font-weight: 700; }
-.val-purple { color: #a78bfa; font-weight: 700; }
-
-/* ── alerts ── */
-.alert {
-  border-radius: 10px;
-  padding: 12px 16px;
-  font-size: 13px;
-  margin: 12px 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.alert-success { background: rgba(74,222,128,.08); border: 1px solid rgba(74,222,128,.2); color: #4ade80; }
-.alert-error   { background: rgba(248,113,113,.08); border: 1px solid rgba(248,113,113,.2); color: #f87171; }
-.alert-info    { background: rgba(99,102,241,.08);  border: 1px solid rgba(99,102,241,.2);  color: #a5b4fc; }
-
-/* ── progress ── */
-div[data-testid="stProgress"] > div { background: #1e2540 !important; border-radius: 10px !important; }
-div[data-testid="stProgress"] > div > div { background: linear-gradient(90deg, #4f46e5, #7c3aed) !important; border-radius: 10px !important; }
-
-/* ── download button ── */
-div[data-testid="stDownloadButton"] button {
-  background: linear-gradient(135deg, #059669 0%, #0d9488 100%) !important;
-  color: white !important;
-  border: none !important;
-  border-radius: 10px !important;
-  font-weight: 600 !important;
-  box-shadow: 0 4px 15px rgba(5,150,105,.25) !important;
-}
-
-/* ── dataframe ── */
-.stDataFrame { border-radius: 12px !important; overflow: hidden !important; }
-iframe[title="st.iframe"] { border-radius: 12px; }
-
-/* ── tabs ── */
-.stTabs [data-baseweb="tab-list"] {
-  background: #0d1020 !important;
-  border-radius: 10px !important;
-  gap: 4px !important;
-  padding: 4px !important;
-  border: 1px solid #1e2540 !important;
-}
-.stTabs [data-baseweb="tab"] {
-  background: transparent !important;
-  color: #6b7280 !important;
-  border-radius: 8px !important;
-  font-weight: 600 !important;
-  font-size: 13px !important;
-}
-.stTabs [aria-selected="true"] {
-  background: #1e2540 !important;
-  color: #fff !important;
-}
-.stTabs [data-baseweb="tab-panel"] { background: transparent !important; padding-top: 20px !important; }
-
-/* ── empty state ── */
-.empty-state {
-  text-align: center;
-  padding: 80px 20px;
-  background: #0d1020;
-  border: 1px dashed #1e2540;
-  border-radius: 16px;
-}
-.empty-icon { font-size: 56px; margin-bottom: 16px; }
-.empty-title { font-size: 20px; font-weight: 700; color: #fff; margin-bottom: 8px; }
-.empty-sub { font-size: 14px; color: #6b7280; max-width: 360px; margin: 0 auto; }
-
-/* scrollbar */
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: #0d1020; }
-::-webkit-scrollbar-thumb { background: #2a3050; border-radius: 3px; }
-</style>
-""", unsafe_allow_html=True)
-
-# ── session state ─────────────────────────────────────────────────────────────
-for k, v in [("all_riders", []), ("paste_images", []), ("last_updated", None)]:
-    if k not in st.session_state:
-        st.session_state[k] = v
-
-# ── helpers ───────────────────────────────────────────────────────────────────
-
-def img_to_b64(img_bytes: bytes) -> tuple[str, str]:
-    """Returns (base64_str, media_type)."""
-    # detect format
-    try:
-        img = Image.open(io.BytesIO(img_bytes))
-        fmt = (img.format or "PNG").upper()
-        mt_map = {"JPEG": "image/jpeg", "JPG": "image/jpeg",
-                  "PNG": "image/png", "WEBP": "image/webp", "GIF": "image/gif"}
-        mt = mt_map.get(fmt, "image/png")
-    except Exception:
-        mt = "image/png"
-    return base64.standard_b64encode(img_bytes).decode(), mt
+# ════════════════════════════════════════════════════════════════════════
+# 1) DATABASE (SQLite) — المصدر الحقيقي للبيانات
+# ════════════════════════════════════════════════════════════════════════
+DB_PATH = Path(__file__).parent / "data" / "tracker.db"
+DB_PATH.parent.mkdir(exist_ok=True)
 
 
-def extract_riders(client, img_b64: str, media_type: str) -> list[dict]:
-    prompt = """You are a data extraction assistant for a delivery operations dashboard.
+def get_conn():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute("PRAGMA foreign_keys = ON;")
+    return conn
 
-Analyze this screenshot carefully and extract ALL riders/couriers visible.
 
-For EACH rider return a JSON object with EXACTLY these keys:
-- rider_id: numeric ID as string
-- name: full display name
-- session: session time e.g. "18:00 - 00:00"
-- utr: UTR float e.g. 0.6
-- deliveries: system deliveries count integer (the number next to "Deliveries")
-- accepted: REAL accepted orders integer (from donut chart "Accepted" label - this is the TRUE count)
-- stacked: stacked orders integer (0 if not shown)
-- acceptance_rate: float e.g. 50.0
-- cash_balance: float numeric only e.g. 197.36
-- currency: "SAR", "EGP", "USD" etc.
-- rider_state: "Working" | "Offline" | "Idle"
-- location_area: area text or ""
-- phone: phone number string or ""
+def init_db():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS riders (
+            rider_id TEXT PRIMARY KEY, name TEXT NOT NULL, phone TEXT, area TEXT,
+            vehicle_type TEXT, active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            order_id TEXT PRIMARY KEY, rider_id TEXT, rider_name TEXT,
+            order_date TEXT NOT NULL, order_time TEXT, pickup_area TEXT, drop_area TEXT,
+            distance_km REAL DEFAULT 0, order_value REAL DEFAULT 0, currency TEXT DEFAULT 'SAR',
+            status TEXT DEFAULT 'delivered', source TEXT DEFAULT 'manual',
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (rider_id) REFERENCES riders(rider_id)
+        );
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS sync_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, sync_type TEXT, rows_synced INTEGER,
+            status TEXT, message TEXT, synced_at TEXT DEFAULT (datetime('now'))
+        );
+    """)
+    conn.commit()
+    conn.close()
 
-IMPORTANT: "deliveries" is what the SYSTEM shows (often wrong/low).
-"accepted" is the REAL count from the donut/pie chart accepted section.
 
-Return ONLY a raw JSON array, no markdown, no code fences, no explanation.
-If no riders: return []"""
+def db_upsert_rider(rider: dict):
+    conn = get_conn()
+    conn.execute("""
+        INSERT INTO riders (rider_id, name, phone, area, vehicle_type, active)
+        VALUES (:rider_id, :name, :phone, :area, :vehicle_type, :active)
+        ON CONFLICT(rider_id) DO UPDATE SET
+            name=excluded.name, phone=excluded.phone, area=excluded.area,
+            vehicle_type=excluded.vehicle_type, active=excluded.active
+    """, rider)
+    conn.commit()
+    conn.close()
 
-    resp = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=4000,
-        messages=[{"role": "user", "content": [
-            {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": img_b64}},
-            {"type": "text", "text": prompt}
-        ]}]
+
+def db_get_riders() -> pd.DataFrame:
+    conn = get_conn()
+    df = pd.read_sql_query("SELECT * FROM riders ORDER BY name", conn)
+    conn.close()
+    return df
+
+
+def db_delete_rider(rider_id: str):
+    conn = get_conn()
+    conn.execute("DELETE FROM riders WHERE rider_id=?", (rider_id,))
+    conn.commit()
+    conn.close()
+
+
+def db_upsert_orders(rows: list) -> int:
+    if not rows:
+        return 0
+    conn = get_conn()
+    cur = conn.cursor()
+    for r in rows:
+        r.setdefault("currency", "SAR")
+        r.setdefault("status", "delivered")
+        r.setdefault("source", "manual")
+        cur.execute("""
+            INSERT INTO orders (order_id, rider_id, rider_name, order_date, order_time,
+                                 pickup_area, drop_area, distance_km, order_value,
+                                 currency, status, source)
+            VALUES (:order_id, :rider_id, :rider_name, :order_date, :order_time,
+                    :pickup_area, :drop_area, :distance_km, :order_value,
+                    :currency, :status, :source)
+            ON CONFLICT(order_id) DO UPDATE SET
+                rider_id=excluded.rider_id, rider_name=excluded.rider_name,
+                order_date=excluded.order_date, order_time=excluded.order_time,
+                pickup_area=excluded.pickup_area, drop_area=excluded.drop_area,
+                distance_km=excluded.distance_km, order_value=excluded.order_value,
+                currency=excluded.currency, status=excluded.status, source=excluded.source
+        """, r)
+    conn.commit()
+    conn.close()
+    return len(rows)
+
+
+def db_get_orders(date_from=None, date_to=None) -> pd.DataFrame:
+    conn = get_conn()
+    q = "SELECT * FROM orders WHERE 1=1"
+    params = []
+    if date_from:
+        q += " AND order_date >= ?"; params.append(str(date_from))
+    if date_to:
+        q += " AND order_date <= ?"; params.append(str(date_to))
+    q += " ORDER BY order_date DESC, order_time DESC"
+    df = pd.read_sql_query(q, conn, params=params)
+    conn.close()
+    return df
+
+
+def db_delete_order(order_id: str):
+    conn = get_conn()
+    conn.execute("DELETE FROM orders WHERE order_id=?", (order_id,))
+    conn.commit()
+    conn.close()
+
+
+def db_log_sync(sync_type: str, rows: int, status: str, message: str = ""):
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO sync_log (sync_type, rows_synced, status, message) VALUES (?,?,?,?)",
+        (sync_type, rows, status, message)
     )
-    raw = resp.content[0].text.strip().replace("```json", "").replace("```", "").strip()
-    return json.loads(raw)
+    conn.commit()
+    conn.close()
 
 
-def merge_riders(existing: list, new: list) -> list:
-    id_map = {r["rider_id"]: i for i, r in enumerate(existing) if r.get("rider_id")}
-    result = existing.copy()
-    for r in new:
-        rid = r.get("rider_id", "")
-        if rid and rid in id_map:
-            result[id_map[rid]] = r
-        else:
-            result.append(r)
-            if rid:
-                id_map[rid] = len(result) - 1
-    return result
+def db_get_sync_log(limit=20) -> pd.DataFrame:
+    conn = get_conn()
+    df = pd.read_sql_query("SELECT * FROM sync_log ORDER BY synced_at DESC LIMIT ?", conn, params=(limit,))
+    conn.close()
+    return df
 
 
-def build_excel(riders: list) -> bytes:
+# ════════════════════════════════════════════════════════════════════════
+# 2) AUTH — تسجيل الدخول والصلاحيات (بدون مكتبات خارجية إضافية)
+# ════════════════════════════════════════════════════════════════════════
+import yaml
+import bcrypt
+
+USERS_FILE = Path(__file__).parent / "users.yaml"
+
+
+def load_users_config():
+    with open(USERS_FILE, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def check_password(plain: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(plain.encode(), hashed.encode())
+    except Exception:
+        return False
+
+
+def login_screen():
+    """شاشة لوجن بسيطة، بترجع (name, username, role). بتوقف الصفحة لحد ما تسجل دخول صح."""
+    if st.session_state.get("auth_ok"):
+        return st.session_state["auth_name"], st.session_state["auth_username"], st.session_state["auth_role"]
+
+    st.markdown("""
+    <div style="max-width:420px;margin:80px auto 0;text-align:center;">
+        <div style="font-size:40px;">🛵</div>
+        <div style="font-size:22px;font-weight:800;">Rider Tracker</div>
+        <div style="color:#6b7280;font-size:13px;margin-bottom:24px;">تسجيل الدخول للمتابعة</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    config = load_users_config()
+    c1, c2, c3 = st.columns([1, 1.2, 1])
+    with c2:
+        with st.form("login_form"):
+            username = st.text_input("اسم المستخدم")
+            password = st.text_input("كلمة المرور", type="password")
+            submitted = st.form_submit_button("دخول", use_container_width=True)
+
+        if submitted:
+            users = config["credentials"]["usernames"]
+            user = users.get(username)
+            if user and check_password(password, user["password"]):
+                st.session_state["auth_ok"] = True
+                st.session_state["auth_name"] = user["name"]
+                st.session_state["auth_username"] = username
+                st.session_state["auth_role"] = user.get("role", "member")
+                st.rerun()
+            else:
+                st.error("❌ اسم المستخدم أو كلمة المرور غلط")
+
+    st.stop()
+
+
+def require_admin():
+    if st.session_state.get("auth_role") != "admin":
+        st.warning("🔒 الصفحة دي للأدمن بس.")
+        st.stop()
+
+
+def logout_button():
+    if st.sidebar.button("🚪 تسجيل الخروج"):
+        for k in ["auth_ok", "auth_name", "auth_username", "auth_role"]:
+            st.session_state.pop(k, None)
+        st.rerun()
+
+
+# ════════════════════════════════════════════════════════════════════════
+# 3) HUNGER STATION API CLIENT — عدّل هنا بس لما توصلك بيانات الـ API
+# ════════════════════════════════════════════════════════════════════════
+class HungerStationClient:
+    def __init__(self):
+        cfg = st.secrets.get("hunger_station", {}) if hasattr(st, "secrets") else {}
+        self.base_url = cfg.get("base_url", "")
+        self.api_key = cfg.get("api_key", "")
+        self.is_configured = bool(self.base_url and self.api_key)
+
+    def _headers(self):
+        return {"Authorization": f"Bearer {self.api_key}", "Accept": "application/json"}
+
+    def fetch_orders(self, date_from: date, date_to: date) -> list:
+        """
+        لازم ترجع list of dict بنفس شكل جدول orders:
+        order_id, rider_id, rider_name, order_date, order_time,
+        pickup_area, drop_area, distance_km, order_value, currency, status
+
+        لما توصلك الـ docs الحقيقية من هنجر ستيشن، فك التعليق عن الكود تحت
+        وعدّل أسماء الحقول عشان تطابق شكل الـ JSON بتاعهم بالظبط.
+        """
+        if not self.is_configured:
+            raise RuntimeError(
+                "لسه معملتش ربط مع Hunger Station API. ضيف base_url و api_key "
+                "في .streamlit/secrets.toml تحت [hunger_station]"
+            )
+        # import requests
+        # resp = requests.get(f"{self.base_url}/v1/orders", headers=self._headers(),
+        #     params={"date_from": date_from.isoformat(), "date_to": date_to.isoformat()}, timeout=30)
+        # resp.raise_for_status()
+        # raw = resp.json().get("data", [])
+        # mapped = []
+        # for o in raw:
+        #     mapped.append({
+        #         "order_id": str(o["id"]), "rider_id": str(o["courier"]["id"]),
+        #         "rider_name": o["courier"]["name"], "order_date": o["created_at"][:10],
+        #         "order_time": o["created_at"][11:16], "pickup_area": o.get("branch_name", ""),
+        #         "drop_area": o.get("customer_area", ""), "distance_km": float(o.get("distance_km", 0)),
+        #         "order_value": float(o.get("total", 0)), "currency": o.get("currency", "SAR"),
+        #         "status": o.get("status", "delivered"),
+        #     })
+        # return mapped
+        raise NotImplementedError("الشكل الحقيقي للـ API لسه مش معروف — عدّل الدالة دي لما توصلك الـ docs.")
+
+    def fetch_riders(self) -> list:
+        if not self.is_configured:
+            raise RuntimeError("لسه معملتش ربط مع Hunger Station API.")
+        raise NotImplementedError("هتتفعّل لما توصل بيانات الـ API.")
+
+
+# ════════════════════════════════════════════════════════════════════════
+# 4) GOOGLE SHEETS SYNC — تغذية Looker Studio
+# ════════════════════════════════════════════════════════════════════════
+def sheets_is_configured() -> bool:
+    try:
+        return "gcp_service_account" in st.secrets and bool(st.secrets["gcp_service_account"].get("spreadsheet_id"))
+    except Exception:
+        return False
+
+
+def sheets_get_url() -> str:
+    try:
+        sid = st.secrets["gcp_service_account"]["spreadsheet_id"]
+        return f"https://docs.google.com/spreadsheets/d/{sid}"
+    except Exception:
+        return ""
+
+
+def _sheets_write_df(sh, tab_name: str, df: pd.DataFrame):
+    try:
+        ws = sh.worksheet(tab_name)
+        ws.clear()
+    except Exception:
+        ws = sh.add_worksheet(title=tab_name, rows=max(len(df) + 10, 100), cols=max(len(df.columns) + 2, 10))
+    if df.empty:
+        ws.update([["لا توجد بيانات"]])
+        return
+    values = [df.columns.tolist()] + df.astype(str).values.tolist()
+    ws.update(values)
+
+
+def sheets_sync_all(orders_df: pd.DataFrame, riders_summary_df: pd.DataFrame, daily_summary_df: pd.DataFrame) -> int:
+    import gspread
+    from google.oauth2.service_account import Credentials
+
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    spreadsheet_id = creds_dict.pop("spreadsheet_id", None)
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    client = gspread.authorize(creds)
+    sh = client.open_by_key(spreadsheet_id)
+
+    _sheets_write_df(sh, "Orders", orders_df)
+    _sheets_write_df(sh, "Riders_Summary", riders_summary_df)
+    _sheets_write_df(sh, "Daily_Summary", daily_summary_df)
+    return len(orders_df)
+
+
+# ════════════════════════════════════════════════════════════════════════
+# 5) ANALYSIS — كل حسابات الأداء والتحليل
+# ════════════════════════════════════════════════════════════════════════
+def riders_summary(orders: pd.DataFrame) -> pd.DataFrame:
+    if orders.empty:
+        return pd.DataFrame(columns=["rider_id", "rider_name", "total_orders", "delivered",
+                                      "cancelled", "total_km", "avg_km_per_order",
+                                      "total_value", "acceptance_rate"])
+    g = orders.groupby(["rider_id", "rider_name"], dropna=False)
+    out = g.agg(
+        total_orders=("order_id", "count"),
+        delivered=("status", lambda s: (s == "delivered").sum()),
+        cancelled=("status", lambda s: (s == "cancelled").sum()),
+        rejected=("status", lambda s: (s == "rejected").sum()),
+        total_km=("distance_km", "sum"),
+        total_value=("order_value", "sum"),
+    ).reset_index()
+    out["avg_km_per_order"] = (out["total_km"] / out["total_orders"]).round(2)
+    out["acceptance_rate"] = ((out["delivered"] / out["total_orders"]) * 100).round(1)
+    return out.sort_values("total_orders", ascending=False)
+
+
+def daily_summary(orders: pd.DataFrame) -> pd.DataFrame:
+    if orders.empty:
+        return pd.DataFrame(columns=["order_date", "total_orders", "total_km", "total_value", "active_riders"])
+    g = orders.groupby("order_date")
+    out = g.agg(
+        total_orders=("order_id", "count"), total_km=("distance_km", "sum"),
+        total_value=("order_value", "sum"), active_riders=("rider_id", "nunique"),
+    ).reset_index()
+    return out.sort_values("order_date", ascending=False)
+
+
+def hourly_distribution(orders: pd.DataFrame) -> pd.DataFrame:
+    if orders.empty or "order_time" not in orders.columns:
+        return pd.DataFrame(columns=["hour", "total_orders"])
+    tmp = orders.copy()
+    tmp["hour"] = tmp["order_time"].astype(str).str.slice(0, 2)
+    out = tmp.groupby("hour").agg(total_orders=("order_id", "count")).reset_index()
+    return out.sort_values("hour")
+
+
+def compute_kpis(orders: pd.DataFrame) -> dict:
+    if orders.empty:
+        return dict(total_orders=0, total_km=0, total_value=0, active_riders=0, avg_km=0, cancellation_rate=0)
+    total = len(orders)
+    cancelled = (orders["status"] == "cancelled").sum()
+    return dict(
+        total_orders=total, total_km=round(orders["distance_km"].sum(), 1),
+        total_value=round(orders["order_value"].sum(), 1), active_riders=orders["rider_id"].nunique(),
+        avg_km=round(orders["distance_km"].mean(), 2) if total else 0,
+        cancellation_rate=round((cancelled / total) * 100, 1) if total else 0,
+    )
+
+
+def auto_insights(orders: pd.DataFrame, r_summary: pd.DataFrame, d_summary: pd.DataFrame) -> list:
+    insights = []
+    if orders.empty:
+        return ["لا توجد بيانات كافية لعمل تحليل بعد."]
+    k = compute_kpis(orders)
+    insights.append(f"إجمالي الطلبات في الفترة المحددة: {k['total_orders']} طلب، بإجمالي {k['total_km']} كم.")
+    insights.append(f"نسبة الإلغاء: {k['cancellation_rate']}% — "
+                     f"{'مرتفعة، يُنصح بمراجعة أسباب الإلغاء' if k['cancellation_rate'] > 15 else 'ضمن المعدل الطبيعي'}.")
+    if not r_summary.empty:
+        top = r_summary.iloc[0]
+        insights.append(f"أعلى مندوب في عدد الطلبات: {top['rider_name']} بـ {int(top['total_orders'])} طلب.")
+        low_acc = r_summary[r_summary["acceptance_rate"] < 70]
+        if not low_acc.empty:
+            names = "، ".join(low_acc["rider_name"].head(5).tolist())
+            insights.append(f"مناديب بنسبة قبول أقل من 70%: {names}.")
+    if not d_summary.empty:
+        busiest = d_summary.sort_values("total_orders", ascending=False).iloc[0]
+        insights.append(f"أكثر يوم ازدحاماً: {busiest['order_date']} بـ {int(busiest['total_orders'])} طلب.")
+    return insights
+
+
+# ════════════════════════════════════════════════════════════════════════
+# 6) EXCEL EXPORT — تصدير كل التقارير في ملف واحد منسّق
+# ════════════════════════════════════════════════════════════════════════
+HEADER_FILL = PatternFill("solid", start_color="4F46E5")
+HEADER_FONT = Font(name="Arial", bold=True, color="FFFFFF", size=11)
+CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
+THIN = Side(style="thin", color="D1D5DB")
+BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+ZEBRA = PatternFill("solid", start_color="F9FAFB")
+
+
+def _xl_write_table(ws, df: pd.DataFrame, start_row=1, title=None):
+    r = start_row
+    if title:
+        ws.cell(row=r, column=1, value=title).font = Font(bold=True, size=13, color="1F2937")
+        r += 2
+    if df.empty:
+        ws.cell(row=r, column=1, value="لا توجد بيانات")
+        return r + 1
+    for ci, col in enumerate(df.columns, 1):
+        cell = ws.cell(row=r, column=ci, value=str(col))
+        cell.font = HEADER_FONT; cell.fill = HEADER_FILL; cell.alignment = CENTER; cell.border = BORDER
+        ws.column_dimensions[get_column_letter(ci)].width = max(14, len(str(col)) + 4)
+    ws.row_dimensions[r].height = 22
+    for ri, (_, row) in enumerate(df.iterrows(), r + 1):
+        for ci, val in enumerate(row, 1):
+            cell = ws.cell(row=ri, column=ci, value=val)
+            cell.border = BORDER; cell.alignment = CENTER
+            if ri % 2 == 0:
+                cell.fill = ZEBRA
+    return r + len(df) + 2
+
+
+def build_full_report(orders: pd.DataFrame, date_from=None, date_to=None) -> bytes:
+    r_sum = riders_summary(orders)
+    d_sum = daily_summary(orders)
+    k = compute_kpis(orders)
+    insights = auto_insights(orders, r_sum, d_sum)
+
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = "Riders Performance"
+    ws.title = "ملخص عام"; ws.sheet_view.rightToLeft = True
+    period = f"{date_from} → {date_to}" if date_from and date_to else "كل البيانات"
+    ws.cell(row=1, column=1, value=f"تقرير أداء المناديب — الفترة: {period}").font = Font(bold=True, size=15)
+    ws.cell(row=2, column=1, value=f"تاريخ إنشاء التقرير: {datetime.now().strftime('%Y-%m-%d %H:%M')}").font = Font(italic=True, size=10, color="6B7280")
+    kpi_df = pd.DataFrame([
+        ("إجمالي الطلبات", k["total_orders"]), ("إجمالي الكيلومترات", k["total_km"]),
+        ("إجمالي القيمة", k["total_value"]), ("عدد المناديب النشطين", k["active_riders"]),
+        ("متوسط الكم لكل طلب", k["avg_km"]), ("نسبة الإلغاء %", k["cancellation_rate"]),
+    ], columns=["المؤشر", "القيمة"])
+    _xl_write_table(ws, kpi_df, start_row=4, title="المؤشرات الرئيسية")
 
-    hf = Font(name="Arial", bold=True, color="FFFFFF", size=10)
-    hfill = PatternFill("solid", start_color="4F46E5")
-    c = Alignment(horizontal="center", vertical="center")
-    l = Alignment(horizontal="left", vertical="center")
-    thin = Side(style="thin", color="E5E7EB")
-    bdr = Border(left=thin, right=thin, top=thin, bottom=thin)
+    ws2 = wb.create_sheet("أداء المناديب"); ws2.sheet_view.rightToLeft = True
+    r_sum_ar = r_sum.rename(columns={
+        "rider_id": "رقم المندوب", "rider_name": "الاسم", "total_orders": "إجمالي الطلبات",
+        "delivered": "تم التسليم", "cancelled": "ملغي", "rejected": "مرفوض",
+        "total_km": "إجمالي الكم", "total_value": "إجمالي القيمة",
+        "avg_km_per_order": "متوسط كم/طلب", "acceptance_rate": "نسبة القبول %"
+    })
+    _xl_write_table(ws2, r_sum_ar, title="أداء كل مندوب")
 
-    headers = ["ID", "Name", "Phone", "Session", "UTR",
-               "Sys. Deliveries", "Real Accepted", "Stacked",
-               "Acceptance %", "Cash Balance", "Currency", "State", "Location"]
-    widths   = [12, 28, 16, 16, 8, 16, 14, 10, 14, 14, 10, 12, 22]
+    ws3 = wb.create_sheet("ملخص يومي"); ws3.sheet_view.rightToLeft = True
+    d_sum_ar = d_sum.rename(columns={
+        "order_date": "التاريخ", "total_orders": "إجمالي الطلبات",
+        "total_km": "إجمالي الكم", "total_value": "إجمالي القيمة", "active_riders": "عدد المناديب"
+    })
+    _xl_write_table(ws3, d_sum_ar, title="ملخص كل يوم")
 
-    for ci, (h, w) in enumerate(zip(headers, widths), 1):
-        cell = ws.cell(row=1, column=ci, value=h)
-        cell.font = hf; cell.fill = hfill
-        cell.alignment = c; cell.border = bdr
-        ws.column_dimensions[get_column_letter(ci)].width = w
-    ws.row_dimensions[1].height = 26
+    ws4 = wb.create_sheet("تفاصيل الطلبات"); ws4.sheet_view.rightToLeft = True
+    orders_ar = orders.rename(columns={
+        "order_id": "رقم الطلب", "rider_id": "رقم المندوب", "rider_name": "اسم المندوب",
+        "order_date": "التاريخ", "order_time": "الوقت", "pickup_area": "منطقة الاستلام",
+        "drop_area": "منطقة التسليم", "distance_km": "الكيلومترات", "order_value": "القيمة",
+        "currency": "العملة", "status": "الحالة", "source": "المصدر"
+    }) if not orders.empty else orders
+    _xl_write_table(ws4, orders_ar, title="كل الطلبات (بعد الفلاتر)")
 
-    wfill = PatternFill("solid", start_color="ECFDF5")
-    ofill = PatternFill("solid", start_color="FEF2F2")
-    afill = PatternFill("solid", start_color="FEFCE8")
-    a2    = PatternFill("solid", start_color="F9FAFB")
-
-    for ri, r in enumerate(riders, 2):
-        state = str(r.get("rider_state", "")).lower()
-        rfill = wfill if "work" in state else ofill if "off" in state else afill if "idle" in state else (a2 if ri % 2 == 0 else None)
-        row_data = [
-            r.get("rider_id",""), r.get("name",""), r.get("phone",""),
-            r.get("session",""), r.get("utr",""),
-            r.get("deliveries",""), r.get("accepted",""), r.get("stacked",""),
-            r.get("acceptance_rate",""), r.get("cash_balance",""),
-            r.get("currency",""), r.get("rider_state",""), r.get("location_area","")
-        ]
-        for ci, val in enumerate(row_data, 1):
-            cell = ws.cell(row=ri, column=ci, value=val)
-            cell.border = bdr
-            cell.alignment = l if ci == 2 else c
-            if rfill: cell.fill = rfill
-        ws.row_dimensions[ri].height = 22
-
-    # summary sheet
-    ws2 = wb.create_sheet("Summary")
-    utrs_v = [r["utr"] for r in riders if isinstance(r.get("utr"), (int,float))]
-    summary = [
-        ("Generated At", datetime.now().strftime("%Y-%m-%d %H:%M")),
-        ("Total Riders", len(riders)),
-        ("Working", sum(1 for r in riders if "work" in str(r.get("rider_state","")).lower())),
-        ("Offline",  sum(1 for r in riders if "off"  in str(r.get("rider_state","")).lower())),
-        ("Avg UTR",  round(sum(utrs_v)/len(utrs_v), 2) if utrs_v else 0),
-        ("Total Real Accepted", sum(r.get("accepted",0) or 0 for r in riders)),
-        ("Total Sys. Deliveries", sum(r.get("deliveries",0) or 0 for r in riders)),
-    ]
-    for i, (k, v) in enumerate(summary, 1):
-        ws2.cell(row=i, column=1, value=k).font = Font(bold=True)
-        ws2.cell(row=i, column=2, value=v)
-    ws2.column_dimensions["A"].width = 26
-    ws2.column_dimensions["B"].width = 22
+    ws5 = wb.create_sheet("تحليل تلقائي"); ws5.sheet_view.rightToLeft = True
+    ws5.cell(row=1, column=1, value="ملاحظات وتحليل تلقائي").font = Font(bold=True, size=14)
+    for i, line in enumerate(insights, 3):
+        c = ws5.cell(row=i, column=1, value=f"•  {line}")
+        c.alignment = Alignment(horizontal="right", wrap_text=True)
+        ws5.row_dimensions[i].height = 22
+    ws5.column_dimensions["A"].width = 100
 
     buf = BytesIO()
     wb.save(buf)
     return buf.getvalue()
 
 
-def badge_html(state: str) -> str:
-    s = state.lower()
-    if "work" in s: return '<span class="badge badge-working">● Working</span>'
-    if "off"  in s: return '<span class="badge badge-offline">● Offline</span>'
-    return '<span class="badge badge-idle">● Idle</span>'
+# ════════════════════════════════════════════════════════════════════════
+# 7) STREAMLIT UI
+# ════════════════════════════════════════════════════════════════════════
+name, username, role = login_screen()
+logout_button()
+init_db()
 
+st.sidebar.markdown(f"👋 أهلاً **{name}** ({'أدمن' if role == 'admin' else 'عضو فريق'})")
 
-# ── get API key from secrets or input ─────────────────────────────────────────
-api_key = st.secrets.get("ANTHROPIC_API_KEY", "") if hasattr(st, "secrets") else ""
+st.sidebar.markdown("### 🔎 الفلاتر")
+default_from = date.today() - timedelta(days=30)
+date_from = st.sidebar.date_input("من تاريخ", value=default_from)
+date_to = st.sidebar.date_input("إلى تاريخ", value=date.today())
 
-# ── NAVBAR ────────────────────────────────────────────────────────────────────
-total_r   = len(st.session_state.all_riders)
-working_r = sum(1 for r in st.session_state.all_riders if "work" in str(r.get("rider_state","")).lower())
+all_orders = db_get_orders(date_from=date_from, date_to=date_to)
+all_riders_df = db_get_riders()
 
-st.markdown(f"""
-<div class="navbar">
-  <div class="navbar-brand">
-    <span>🛵 Rider<span class="dot">.</span>Tracker</span>
-    <span class="navbar-badge">{total_r} riders · {working_r} working</span>
-  </div>
-  <div class="navbar-right">
-    <span class="navbar-badge">v2.0</span>
-  </div>
-</div>
-<div class="dash-wrap">
-""", unsafe_allow_html=True)
+rider_filter = st.sidebar.multiselect(
+    "فلترة بالمندوب",
+    options=sorted(all_orders["rider_name"].dropna().unique().tolist()) if not all_orders.empty else []
+)
+if rider_filter:
+    all_orders = all_orders[all_orders["rider_name"].isin(rider_filter)]
 
-# ── TABS ──────────────────────────────────────────────────────────────────────
-tab_upload, tab_dashboard, tab_table = st.tabs(["📤  Upload & Extract", "📊  Dashboard", "📋  Full Table"])
+status_filter = st.sidebar.multiselect("فلترة بالحالة", options=["delivered", "cancelled", "rejected"], default=[])
+if status_filter:
+    all_orders = all_orders[all_orders["status"].isin(status_filter)]
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — UPLOAD
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_upload:
+st.title("🛵 نظام تراكنج المناديب")
 
-    # API key (only if not in secrets)
-    if not api_key:
-        st.markdown('<div class="sec-title">🔑 API Configuration</div>', unsafe_allow_html=True)
-        api_key = st.text_input("Anthropic API Key", type="password", placeholder="sk-ant-api03-...")
-        st.markdown('<div class="alert alert-info">💡 To skip entering the key every time, add <b>ANTHROPIC_API_KEY</b> in your Streamlit Secrets (Settings → Secrets)</div>', unsafe_allow_html=True)
+tabs = st.tabs(["📊 الداشبورد", "➕ إدخال / استيراد", "🏍️ المناديب", "📤 التصدير والمزامنة", "⚙️ الإعدادات"])
 
-    # ── upload section ────────────────────────────────────────────────────────
-    st.markdown('<div class="sec-title">📎 Add Screenshots</div>', unsafe_allow_html=True)
+# ── TAB 1: Dashboard ──────────────────────────────────────────────────────
+with tabs[0]:
+    if all_orders.empty:
+        st.info("مفيش بيانات في الفترة/الفلاتر دي لسه. روح تبويب 'إدخال / استيراد' وضيف بيانات.")
+    else:
+        k = compute_kpis(all_orders)
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("إجمالي الطلبات", k["total_orders"])
+        c2.metric("إجمالي الكيلومترات", k["total_km"])
+        c3.metric("إجمالي القيمة", f"{k['total_value']:,.0f}")
+        c4.metric("عدد المناديب النشطين", k["active_riders"])
+        c5.metric("نسبة الإلغاء", f"{k['cancellation_rate']}%")
 
-    input_tab1, input_tab2 = st.tabs(["📁  Upload Files", "📋  Paste Image"])
+        r_sum = riders_summary(all_orders)
+        d_sum = daily_summary(all_orders)
+        h_dist = hourly_distribution(all_orders)
 
-    collected_images = []  # list of (bytes, filename)
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            st.subheader("📈 الطلبات يومياً")
+            st.plotly_chart(px.bar(d_sum.sort_values("order_date"), x="order_date", y="total_orders"), use_container_width=True)
+        with cc2:
+            st.subheader("🕐 توزيع الطلبات على الساعات")
+            st.plotly_chart(px.bar(h_dist, x="hour", y="total_orders"), use_container_width=True)
 
-    with input_tab1:
-        uploaded_files = st.file_uploader(
-            "Drop screenshots here",
-            type=["png", "jpg", "jpeg", "webp"],
-            accept_multiple_files=True,
-            label_visibility="collapsed"
-        )
-        if uploaded_files:
-            for f in uploaded_files:
-                f.seek(0)
-                collected_images.append((f.read(), f.name))
-            st.markdown(f'<div class="alert alert-info">📎 {len(uploaded_files)} file(s) ready</div>', unsafe_allow_html=True)
+        st.subheader("🏆 أداء المناديب")
+        st.dataframe(r_sum, use_container_width=True, height=350)
 
-    with input_tab2:
-        st.markdown("""
-        <div style="color:#6b7280; font-size:13px; margin-bottom:12px;">
-        📋 Copy a screenshot to clipboard (Ctrl+C / Cmd+C) then paste it below using Ctrl+V / Cmd+V in the text field — or paste a URL of the image.
-        </div>""", unsafe_allow_html=True)
+        st.subheader("🧠 تحليل تلقائي")
+        for line in auto_insights(all_orders, r_sum, d_sum):
+            st.markdown(f"- {line}")
 
-        paste_url = st.text_input(
-            "Paste image URL or base64",
-            placeholder="https://... or data:image/png;base64,...",
-            label_visibility="collapsed"
-        )
-        if paste_url:
-            import urllib.request
+# ── TAB 2: Data entry / import ───────────────────────────────────────────
+with tabs[1]:
+    st.markdown("### طريقة إضافة البيانات دلوقتي")
+    st.caption("لغاية ما يوصلك API هنجر ستيشن، تقدر تضيف الطلبات يدوي أو تستورد ملف Excel/CSV دفعة واحدة.")
+
+    sub1, sub2, sub3 = st.tabs(["✍️ إدخال يدوي", "📁 استيراد ملف", "🔌 مزامنة من Hunger Station API"])
+
+    with sub1:
+        with st.form("manual_order_form", clear_on_submit=True):
+            oc1, oc2, oc3 = st.columns(3)
+            order_id = oc1.text_input("رقم الطلب *")
+            r_name = oc2.text_input("اسم المندوب *")
+            r_id = oc3.text_input("رقم المندوب *")
+            oc4, oc5, oc6 = st.columns(3)
+            o_date = oc4.date_input("التاريخ", value=date.today())
+            o_time = oc5.time_input("الوقت")
+            km = oc6.number_input("الكيلومترات", min_value=0.0, step=0.1)
+            oc7, oc8, oc9 = st.columns(3)
+            value = oc7.number_input("قيمة الطلب", min_value=0.0, step=1.0)
+            status = oc8.selectbox("الحالة", ["delivered", "cancelled", "rejected"])
+            pickup = oc9.text_input("منطقة الاستلام")
+            if st.form_submit_button("✅ إضافة الطلب"):
+                if not order_id or not r_name or not r_id:
+                    st.error("رقم الطلب واسم ورقم المندوب حقول إجبارية.")
+                else:
+                    db_upsert_orders([{
+                        "order_id": order_id, "rider_id": r_id, "rider_name": r_name,
+                        "order_date": o_date.isoformat(), "order_time": o_time.strftime("%H:%M"),
+                        "pickup_area": pickup, "drop_area": "", "distance_km": km,
+                        "order_value": value, "status": status, "source": "manual",
+                    }])
+                    st.success(f"✅ تم إضافة الطلب {order_id}")
+                    st.rerun()
+
+    with sub2:
+        st.caption("الملف لازم يحتوي أعمدة: order_id, rider_id, rider_name, order_date, order_time, "
+                    "pickup_area, drop_area, distance_km, order_value, status")
+        up = st.file_uploader("ارفع ملف Excel أو CSV", type=["xlsx", "csv"])
+        if up:
             try:
-                if paste_url.startswith("data:image"):
-                    # base64 data URI
-                    header, b64data = paste_url.split(",", 1)
-                    img_bytes = base64.b64decode(b64data)
-                    collected_images.append((img_bytes, "pasted_image.png"))
-                    st.markdown('<div class="alert alert-success">✅ Image loaded from base64</div>', unsafe_allow_html=True)
-                elif paste_url.startswith("http"):
-                    req = urllib.request.Request(paste_url, headers={"User-Agent": "Mozilla/5.0"})
-                    with urllib.request.urlopen(req, timeout=10) as resp:
-                        img_bytes = resp.read()
-                    collected_images.append((img_bytes, "url_image.png"))
-                    st.markdown('<div class="alert alert-success">✅ Image loaded from URL</div>', unsafe_allow_html=True)
+                df = pd.read_csv(up) if up.name.endswith(".csv") else pd.read_excel(up)
+                st.dataframe(df.head(20), use_container_width=True)
+                if st.button("📥 استيراد كل الصفوف دي"):
+                    required = ["order_id", "rider_id", "rider_name", "order_date"]
+                    missing = [c for c in required if c not in df.columns]
+                    if missing:
+                        st.error(f"ناقص الأعمدة دي: {missing}")
+                    else:
+                        rows = df.fillna("").astype(str).to_dict("records")
+                        for r in rows:
+                            r["distance_km"] = float(r.get("distance_km") or 0)
+                            r["order_value"] = float(r.get("order_value") or 0)
+                        n = db_upsert_orders(rows)
+                        st.success(f"✅ تم استيراد {n} صف بنجاح")
+                        st.rerun()
             except Exception as e:
-                st.markdown(f'<div class="alert alert-error">❌ Could not load image: {e}</div>', unsafe_allow_html=True)
+                st.error(f"مشكلة في قراءة الملف: {e}")
 
-        # clipboard paste via file uploader fallback
-        st.markdown('<div style="color:#6b7280;font-size:12px;margin-top:12px;">Or paste directly — click below then Ctrl+V:</div>', unsafe_allow_html=True)
-        pasted_file = st.file_uploader(
-            "Paste here",
-            type=["png","jpg","jpeg","webp"],
-            key="paste_uploader",
-            label_visibility="collapsed"
-        )
-        if pasted_file:
-            pasted_file.seek(0)
-            collected_images.append((pasted_file.read(), "pasted_" + pasted_file.name))
-            st.markdown('<div class="alert alert-success">✅ Pasted image ready</div>', unsafe_allow_html=True)
-
-    # preview thumbnails
-    if collected_images:
-        st.markdown('<div class="sec-title">🖼️ Preview</div>', unsafe_allow_html=True)
-        cols = st.columns(min(len(collected_images), 6))
-        for i, (img_bytes, fname) in enumerate(collected_images):
-            with cols[i % 6]:
-                try:
-                    st.image(img_bytes, caption=fname[:20], use_container_width=True)
-                except Exception:
-                    st.write(fname)
-
-    # ── action buttons ────────────────────────────────────────────────────────
-    st.markdown("")
-    c1, c2, c3 = st.columns([3, 1, 1])
-    with c1:
-        extract_btn = st.button("🔍  Extract Rider Data", use_container_width=True)
-    with c2:
-        clear_btn = st.button("🗑️  Clear All", use_container_width=True)
-    with c3:
-        if st.session_state.all_riders:
-            xlsx = build_excel(st.session_state.all_riders)
-            fname = f"riders_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-            st.download_button("📥  Export", data=xlsx, file_name=fname,
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                               use_container_width=True)
-
-    if clear_btn:
-        st.session_state.all_riders = []
-        st.rerun()
-
-    # ── extraction logic ──────────────────────────────────────────────────────
-    if extract_btn:
-        if not api_key:
-            st.markdown('<div class="alert alert-error">❌ Enter your Anthropic API key above.</div>', unsafe_allow_html=True)
-        elif not collected_images:
-            st.markdown('<div class="alert alert-error">❌ Add at least one screenshot first.</div>', unsafe_allow_html=True)
+    with sub3:
+        client = HungerStationClient()
+        if not client.is_configured:
+            st.warning(
+                "🔌 لسه معملتش ربط الـ API. لما توصلك بيانات الدخول من هنجر ستيشن، ضيفهم في "
+                "`.streamlit/secrets.toml` تحت `[hunger_station]` — ودالة `fetch_orders` فوق في "
+                "الملف ده هتشتغل تلقائياً من غير ما تغيّر حاجة تانية."
+            )
         else:
-            client = anthropic.Anthropic(api_key=api_key)
-            prog = st.progress(0, text="Initializing…")
-            new_riders = []
-            errors = []
-
-            for i, (img_bytes, fname) in enumerate(collected_images):
-                prog.progress(i / len(collected_images), text=f"Reading {fname}…")
+            c1, c2 = st.columns(2)
+            f_from = c1.date_input("من", value=date.today(), key="api_from")
+            f_to = c2.date_input("إلى", value=date.today(), key="api_to")
+            if st.button("🔄 اسحب الطلبات من هنجر ستيشن الآن"):
                 try:
-                    b64, mt = img_to_b64(img_bytes)
-                    riders = extract_riders(client, b64, mt)
-                    new_riders.extend(riders)
+                    rows = client.fetch_orders(f_from, f_to)
+                    n = db_upsert_orders(rows)
+                    db_log_sync("hunger_station_api", n, "success")
+                    st.success(f"✅ اتسحب {n} طلب من الـ API")
+                    st.rerun()
                 except Exception as e:
-                    errors.append(f"{fname}: {e}")
+                    db_log_sync("hunger_station_api", 0, "error", str(e))
+                    st.error(f"❌ فشلت المزامنة: {e}")
 
-            prog.progress(1.0, text="Done ✓")
-            st.session_state.all_riders = merge_riders(st.session_state.all_riders, new_riders)
-            st.session_state.last_updated = datetime.now().strftime("%H:%M:%S")
+# ── TAB 3: Riders management ──────────────────────────────────────────────
+with tabs[2]:
+    st.subheader("🏍️ إدارة المناديب")
+    st.dataframe(all_riders_df, use_container_width=True)
 
-            if new_riders:
-                st.markdown(f'<div class="alert alert-success">✅ Extracted <b>{len(new_riders)}</b> rider(s) from <b>{len(collected_images)}</b> image(s) — Total in report: <b>{len(st.session_state.all_riders)}</b></div>', unsafe_allow_html=True)
-            for err in errors:
-                st.markdown(f'<div class="alert alert-error">⚠️ {err}</div>', unsafe_allow_html=True)
+    if role == "admin":
+        with st.expander("➕ إضافة / تعديل مندوب"):
+            with st.form("rider_form", clear_on_submit=True):
+                rc1, rc2, rc3 = st.columns(3)
+                rid = rc1.text_input("رقم المندوب *")
+                rname = rc2.text_input("الاسم *")
+                rphone = rc3.text_input("الموبايل")
+                rc4, rc5, rc6 = st.columns(3)
+                rarea = rc4.text_input("المنطقة")
+                rvehicle = rc5.selectbox("نوع المركبة", ["دراجة نارية", "دراجة هوائية", "سيارة"])
+                ractive = rc6.selectbox("الحالة", ["نشط", "غير نشط"])
+                if st.form_submit_button("💾 حفظ"):
+                    if not rid or not rname:
+                        st.error("رقم المندوب والاسم إجباريين")
+                    else:
+                        db_upsert_rider({
+                            "rider_id": rid, "name": rname, "phone": rphone, "area": rarea,
+                            "vehicle_type": rvehicle, "active": 1 if ractive == "نشط" else 0,
+                        })
+                        st.success("✅ تم الحفظ")
+                        st.rerun()
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — DASHBOARD
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_dashboard:
-    riders = st.session_state.all_riders
-
-    if not riders:
-        st.markdown("""
-        <div class="empty-state">
-          <div class="empty-icon">🛵</div>
-          <div class="empty-title">No data yet</div>
-          <div class="empty-sub">Go to the Upload tab, add your screenshots, and click Extract.</div>
-        </div>""", unsafe_allow_html=True)
+        with st.expander("🗑️ حذف مندوب"):
+            if not all_riders_df.empty:
+                to_del = st.selectbox("اختر مندوب للحذف", all_riders_df["rider_id"] + " - " + all_riders_df["name"])
+                if st.button("حذف نهائي", type="secondary"):
+                    db_delete_rider(to_del.split(" - ")[0])
+                    st.success("تم الحذف")
+                    st.rerun()
     else:
-        # ── KPI cards ─────────────────────────────────────────────────────────
-        working_c  = sum(1 for r in riders if "work" in str(r.get("rider_state","")).lower())
-        offline_c  = sum(1 for r in riders if "off"  in str(r.get("rider_state","")).lower())
-        utrs_v     = [r["utr"] for r in riders if isinstance(r.get("utr"),(int,float))]
-        avg_utr    = round(sum(utrs_v)/len(utrs_v), 2) if utrs_v else 0
-        tot_acc    = sum(r.get("accepted",0) or 0 for r in riders)
-        tot_del    = sum(r.get("deliveries",0) or 0 for r in riders)
-        diff       = tot_acc - tot_del
+        st.caption("إضافة/حذف المناديب متاح للأدمن فقط.")
 
-        st.markdown(f"""
-        <div class="metrics-grid">
-          <div class="metric-card" style="--accent:#6366f1">
-            <div class="mc-icon">👥</div>
-            <div class="mc-label">Total Riders</div>
-            <div class="mc-value">{len(riders)}</div>
-            <div class="mc-sub">in current report</div>
-          </div>
-          <div class="metric-card" style="--accent:#4ade80">
-            <div class="mc-icon">🟢</div>
-            <div class="mc-label">Working</div>
-            <div class="mc-value">{working_c}</div>
-            <div class="mc-sub">active right now</div>
-          </div>
-          <div class="metric-card" style="--accent:#f87171">
-            <div class="mc-icon">🔴</div>
-            <div class="mc-label">Offline</div>
-            <div class="mc-value">{offline_c}</div>
-            <div class="mc-sub">not on shift</div>
-          </div>
-          <div class="metric-card" style="--accent:#60a5fa">
-            <div class="mc-icon">⚡</div>
-            <div class="mc-label">Avg UTR</div>
-            <div class="mc-value">{avg_utr}</div>
-            <div class="mc-sub">utilization rate</div>
-          </div>
-          <div class="metric-card" style="--accent:#a78bfa">
-            <div class="mc-icon">✅</div>
-            <div class="mc-label">Real Accepted</div>
-            <div class="mc-value">{tot_acc}</div>
-            <div class="mc-sub">+{diff} vs system</div>
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
+# ── TAB 4: Export & sync ──────────────────────────────────────────────────
+with tabs[3]:
+    st.subheader("📤 تصدير كل التقارير مرة واحدة")
+    st.caption("بيطلع ملف Excel واحد فيه: ملخص عام، أداء المناديب، ملخص يومي، تفاصيل الطلبات، وتحليل تلقائي.")
 
-        # ── last updated ──────────────────────────────────────────────────────
-        if st.session_state.last_updated:
-            st.markdown(f'<div style="color:#6b7280;font-size:12px;text-align:right;margin-bottom:8px;">Last updated: {st.session_state.last_updated}</div>', unsafe_allow_html=True)
+    if st.button("📊 توليد ملف التقرير الكامل", use_container_width=True):
+        st.session_state["last_report"] = build_full_report(all_orders, date_from, date_to)
 
-        # ── rider cards ───────────────────────────────────────────────────────
-        st.markdown('<div class="sec-title">🏍️ Riders</div>', unsafe_allow_html=True)
+    if "last_report" in st.session_state:
+        st.download_button(
+            "📥 تحميل التقرير الكامل (Excel)", data=st.session_state["last_report"],
+            file_name=f"rider_tracker_report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
 
-        # sort by UTR desc
-        sorted_riders = sorted(riders, key=lambda r: r.get("utr", 0) or 0, reverse=True)
-
-        for r in sorted_riders:
-            bdg  = badge_html(r.get("rider_state",""))
-            curr = r.get("currency","")
-            utr  = r.get("utr","-")
-            acc  = r.get("accepted","-")
-            dl   = r.get("deliveries","-")
-            ar   = r.get("acceptance_rate","-")
-            bal  = r.get("cash_balance",0)
-
-            utr_color = "#4ade80" if (isinstance(utr,(int,float)) and utr >= 0.8) else \
-                        "#fbbf24" if (isinstance(utr,(int,float)) and utr >= 0.5) else "#f87171"
-
-            st.markdown(f"""
-            <div class="rider-card" style="background:#0d1020;border:1px solid #1e2540;border-radius:14px;
-                padding:16px 22px;margin-bottom:10px;display:flex;align-items:center;
-                justify-content:space-between;transition:border-color .2s;"
-                onmouseover="this.style.borderColor='#6366f1'"
-                onmouseout="this.style.borderColor='#1e2540'">
-              <div style="min-width:200px;">
-                <div style="color:#fff;font-size:15px;font-weight:700;">{r.get('name','Unknown')}</div>
-                <div style="color:#6b7280;font-size:12px;margin-top:3px;">
-                  ID: {r.get('rider_id','-')} &nbsp;·&nbsp; 📞 {r.get('phone','—')}
-                </div>
-                <div style="color:#6b7280;font-size:11px;margin-top:2px;">
-                  🕐 {r.get('session','—')}
-                </div>
-              </div>
-              <div style="display:flex;gap:28px;align-items:center;flex-wrap:wrap;">
-                <div style="text-align:center;">
-                  <div style="color:#6b7280;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;">UTR</div>
-                  <div style="color:{utr_color};font-size:20px;font-weight:800;">{utr}</div>
-                </div>
-                <div style="text-align:center;">
-                  <div style="color:#6b7280;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;">Real Accepted</div>
-                  <div style="color:#4ade80;font-size:20px;font-weight:800;">{acc}</div>
-                </div>
-                <div style="text-align:center;">
-                  <div style="color:#6b7280;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;">Sys. Deliveries</div>
-                  <div style="color:#fbbf24;font-size:20px;font-weight:800;">{dl}</div>
-                </div>
-                <div style="text-align:center;">
-                  <div style="color:#6b7280;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;">Accept %</div>
-                  <div style="color:#60a5fa;font-size:20px;font-weight:800;">{ar}%</div>
-                </div>
-                <div style="text-align:center;">
-                  <div style="color:#6b7280;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;">Balance</div>
-                  <div style="color:#a78bfa;font-size:16px;font-weight:700;">{curr} {bal}</div>
-                </div>
-                <div>{bdg}</div>
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        # ── export button inside dashboard ────────────────────────────────────
-        st.markdown("")
-        xlsx = build_excel(riders)
-        fname = f"riders_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-        st.download_button("📥  Download Excel Report", data=xlsx, file_name=fname,
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           use_container_width=True)
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — FULL TABLE
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_table:
-    riders = st.session_state.all_riders
-    if not riders:
-        st.markdown("""
-        <div class="empty-state">
-          <div class="empty-icon">📋</div>
-          <div class="empty-title">No data yet</div>
-          <div class="empty-sub">Extract riders first from the Upload tab.</div>
-        </div>""", unsafe_allow_html=True)
+    st.divider()
+    st.subheader("🔄 مزامنة مع Google Sheets (لتغذية Looker Studio)")
+    if not sheets_is_configured():
+        st.warning("لسه معملتش ربط Google Sheets. اتبع خطوات README (قسم Google Sheets Setup).")
     else:
-        df = pd.DataFrame(riders)
-        col_order = ["rider_id","name","phone","session","utr","deliveries","accepted",
-                     "stacked","acceptance_rate","cash_balance","currency","rider_state","location_area"]
-        df = df.reindex(columns=[c for c in col_order if c in df.columns])
-        rename = {
-            "rider_id":"ID","name":"Name","phone":"Phone","session":"Session",
-            "utr":"UTR","deliveries":"Sys. Deliveries","accepted":"Real Accepted",
-            "stacked":"Stacked","acceptance_rate":"Accept %","cash_balance":"Balance",
-            "currency":"Currency","rider_state":"State","location_area":"Location"
-        }
-        df = df.rename(columns=rename)
+        st.info(f"الشيت متصل: {sheets_get_url()}")
+        if role == "admin":
+            if st.button("🔄 مزامنة البيانات دلوقتي مع Google Sheets"):
+                try:
+                    n = sheets_sync_all(all_orders, riders_summary(all_orders), daily_summary(all_orders))
+                    db_log_sync("google_sheets", n, "success")
+                    st.success(f"✅ تمت مزامنة {n} صف مع Google Sheets.")
+                except Exception as e:
+                    db_log_sync("google_sheets", 0, "error", str(e))
+                    st.error(f"❌ فشلت المزامنة: {e}")
+        else:
+            st.caption("زرار المزامنة متاح للأدمن فقط.")
 
-        # filter bar
-        fc1, fc2 = st.columns([3,1])
-        with fc1:
-            search = st.text_input("🔎 Search by name or ID", placeholder="Type to filter…", label_visibility="collapsed")
-        with fc2:
-            state_filter = st.selectbox("State", ["All","Working","Offline","Idle"], label_visibility="collapsed")
+    st.divider()
+    st.subheader("📜 سجل آخر عمليات المزامنة")
+    st.dataframe(db_get_sync_log(), use_container_width=True)
 
-        if search:
-            mask = df["Name"].str.contains(search, case=False, na=False) | \
-                   df["ID"].astype(str).str.contains(search, na=False)
-            df = df[mask]
-        if state_filter != "All":
-            df = df[df["State"].str.lower().str.contains(state_filter.lower(), na=False)]
+# ── TAB 5: Settings ────────────────────────────────────────────────────────
+with tabs[4]:
+    require_admin()
+    st.subheader("⚙️ الإعدادات")
+    st.markdown("""
+    - **إدارة المستخدمين والصلاحيات:** عدّل `users.yaml` (باسورد مشفّر bcrypt لكل مستخدم).
+    - **ربط Hunger Station API:** عدّل `.streamlit/secrets.toml` تحت `[hunger_station]`.
+    - **ربط Google Sheets:** عدّل `.streamlit/secrets.toml` تحت `[gcp_service_account]`.
+    """)
+    if not all_orders.empty:
+        del_id = st.selectbox("اختر رقم طلب للحذف", all_orders["order_id"])
+        if st.button("🗑️ حذف الطلب المحدد"):
+            db_delete_order(del_id)
+            st.success("تم الحذف")
+            st.rerun()
 
-        st.dataframe(df, use_container_width=True, height=500)
 
-        st.markdown(f'<div style="color:#6b7280;font-size:12px;margin-top:8px;">Showing {len(df)} of {len(riders)} riders</div>', unsafe_allow_html=True)
+streamlit>=1.36
+pandas>=2.0
+openpyxl>=3.1
+gspread>=6.1
+google-auth>=2.30
+bcrypt>=4.1
+plotly>=5.22
+PyYAML>=6.0
 
-st.markdown("</div>", unsafe_allow_html=True)
+
+# ⚠️ غيّر الباسوردات دي فوراً بعد أول تسجيل دخول!
+# باسورد admin الافتراضي: admin123
+# باسورد member1 الافتراضي: member123
+#
+# عشان تولّد باسورد جديد، شغّل السطرين دول في أي بيئة بايثون فيها bcrypt مثبتة:
+#   import bcrypt
+#   print(bcrypt.hashpw(b"الباسورد_الجديد", bcrypt.gensalt()).decode())
+# وانسخ الناتج بدل الـ hash القديم تحت.
+
+credentials:
+  usernames:
+    admin:
+      name: "المدير"
+      password: "$2b$12$UxP1aBp7Sy0xifCQttut4Olw8bwqcD0Qtmrb6iDcJkmqvY/BoXnzO"
+      role: admin
+    member1:
+      name: "عضو الفريق 1"
+      password: "$2b$12$9vYpOLT8BrUhPjFVWzF4jum0OOwiUUV0VkfgbhbsnacKOtldS6frq"
+      role: member
