@@ -273,71 +273,142 @@ if st.session_state.get("admin_ok") and page == "Admin":
 # ------------------------------------------------------------
 # Public page
 # ------------------------------------------------------------
+LANGS = {"English": "en", "العربية": "ar", "اردو": "ur", "বাংলা": "bn"}
+RTL_LANGS = ("ar", "ur")
+
+TEXTS = {
+    "en": {
+        "title": "Rider Performance", "subtitle": "Check your delivery performance",
+        "id_label": "Rider ID", "id_ph": "Enter your Rider ID",
+        "btn": "View My Performance", "need_id": "Please enter your Rider ID.",
+        "not_found": "No performance record was found for this Rider ID.",
+        "overview": "📊 Performance Overview", "rider": "Rider",
+        "orders": "Total Orders", "in_time": "Orders Delivered On Time", "late": "Late Orders",
+        "acceptance": "Acceptance Rate", "on_time": "On-Time Delivery", "verification": "Verification",
+        "fail": "Fail Order", "final": "Final Quality Score", "segment": "Segment",
+        "footer": "Performance is based on the latest uploaded report.",
+    },
+    "ar": {
+        "title": "أداء المندوب", "subtitle": "تحقق من أداء التوصيل الخاص بك",
+        "id_label": "رقم المندوب", "id_ph": "أدخل رقم المندوب",
+        "btn": "عرض أدائي", "need_id": "من فضلك أدخل رقم المندوب.",
+        "not_found": "لم يتم العثور على سجل أداء لهذا الرقم.",
+        "overview": "📊 نظرة عامة على الأداء", "rider": "مندوب",
+        "orders": "إجمالي الطلبات", "in_time": "الطلبات الموصلة في الوقت", "late": "الطلبات المتأخرة",
+        "acceptance": "نسبة القبول", "on_time": "التوصيل في الوقت", "verification": "التحقق",
+        "fail": "الطلبات الفاشلة", "final": "درجة الجودة النهائية", "segment": "السيجمنت",
+        "footer": "الأداء مبني على آخر تقرير تم رفعه.",
+    },
+    "ur": {
+        "title": "رائیڈر کارکردگی", "subtitle": "اپنی ڈیلیوری کی کارکردگی دیکھیں",
+        "id_label": "رائیڈر آئی ڈی", "id_ph": "اپنی رائیڈر آئی ڈی درج کریں",
+        "btn": "میری کارکردگی دیکھیں", "need_id": "براہ کرم اپنی رائیڈر آئی ڈی درج کریں۔",
+        "not_found": "اس رائیڈر آئی ڈی کا کوئی ریکارڈ نہیں ملا۔",
+        "overview": "📊 کارکردگی کا جائزہ", "rider": "رائیڈر",
+        "orders": "کل آرڈرز", "in_time": "بروقت ڈیلیور ہونے والے آرڈرز", "late": "تاخیر سے آرڈرز",
+        "acceptance": "قبولیت کی شرح", "on_time": "بروقت ڈیلیوری", "verification": "تصدیق",
+        "fail": "ناکام آرڈرز", "final": "حتمی معیار اسکور", "segment": "سیگمنٹ",
+        "footer": "کارکردگی آخری اپ لوڈ کی گئی رپورٹ پر مبنی ہے۔",
+    },
+    "bn": {
+        "title": "রাইডার পারফরম্যান্স", "subtitle": "আপনার ডেলিভারি পারফরম্যান্স দেখুন",
+        "id_label": "রাইডার আইডি", "id_ph": "আপনার রাইডার আইডি লিখুন",
+        "btn": "আমার পারফরম্যান্স দেখুন", "need_id": "অনুগ্রহ করে আপনার রাইডার আইডি লিখুন।",
+        "not_found": "এই রাইডার আইডির কোনো রেকর্ড পাওয়া যায়নি।",
+        "overview": "📊 পারফরম্যান্স ওভারভিউ", "rider": "রাইডার",
+        "orders": "মোট অর্ডার", "in_time": "সময়মতো ডেলিভারি হওয়া অর্ডার", "late": "দেরিতে ডেলিভারি হওয়া অর্ডার",
+        "acceptance": "অ্যাক্সেপ্টেন্স রেট", "on_time": "সময়মতো ডেলিভারি", "verification": "ভেরিফিকেশন",
+        "fail": "ফেইল অর্ডার", "final": "ফাইনাল কোয়ালিটি স্কোর", "segment": "সেগমেন্ট",
+        "footer": "সর্বশেষ আপলোড করা রিপোর্টের ভিত্তিতে পারফরম্যান্স দেখানো হয়েছে।",
+    },
+}
+
 if page == "Rider Performance":
-    st.markdown("""
+    lang_name = st.radio("Language", list(LANGS.keys()), horizontal=True,
+                         key="lang", label_visibility="collapsed")
+    lang = LANGS[lang_name]
+    T = TEXTS[lang]
+
+    if lang in RTL_LANGS:
+        st.markdown("""
+        <style>
+            .brand, .profile, .metric-card, .section-title, .footer-note,
+            [data-testid="stForm"] {direction: rtl; text-align: right;}
+            .brand {text-align: center;}
+            .footer-note {text-align: center;}
+        </style>
+        """, unsafe_allow_html=True)
+
+    st.markdown(f"""
     <div class="brand">
         <div class="brand-icon">🏆</div>
-        <div class="brand-title">Rider Performance</div>
-        <div class="brand-subtitle">Check your delivery performance</div>
+        <div class="brand-title">{html.escape(T["title"])}</div>
+        <div class="brand-subtitle">{html.escape(T["subtitle"])}</div>
     </div>
     """, unsafe_allow_html=True)
 
     with st.form("rider_lookup"):
-        rider_id = st.text_input("Rider ID", placeholder="Enter your Rider ID").strip()
-        search = st.form_submit_button("View My Performance", use_container_width=True, type="primary")
+        rider_id = st.text_input(T["id_label"], placeholder=T["id_ph"]).strip()
+        search = st.form_submit_button(T["btn"], use_container_width=True, type="primary")
 
     if search:
         rider_id = re.sub(r"\.0$", "", rider_id)
         if not rider_id:
-            st.warning("Please enter your Rider ID.")
+            st.session_state["last_id"] = None
+            st.warning(T["need_id"])
         else:
-            d = get_rider(rider_id)
-            if d is None:
-                st.error("No performance record was found for this Rider ID.")
-            else:
-                name = (d.get("rider_name") or "").strip() or "Rider"
-                seg = str(d.get("segment") or "").strip()
-                if seg.lower() in ("", "nan", "none"):
-                    seg = "—"
+            st.session_state["last_id"] = rider_id
 
-                st.markdown(f"""
-                <div class="profile">
-                    <div class="profile-name">{html.escape(name)}</div>
-                    <div class="profile-id">Rider ID: {html.escape(str(d["rider_id"]))}</div>
-                    <div style="margin-top:14px;color:#cbd5e1;font-size:13px;">Segment</div>
-                    <div style="display:inline-block;min-width:76px;text-align:center;border-radius:14px;padding:10px 18px;font-size:25px;font-weight:900;margin-top:4px;background:{segment_color(seg)};color:#ffffff;">{html.escape(seg)}</div>
-                </div>
-                """, unsafe_allow_html=True)
+    shown_id = st.session_state.get("last_id")
 
-                st.markdown('<div class="section-title">📊 Performance Overview</div>',
-                            unsafe_allow_html=True)
+    if shown_id:
+        d = get_rider(shown_id)
+        if d is None:
+            st.error(T["not_found"])
+        else:
+            name = (d.get("rider_name") or "").strip() or T["rider"]
+            seg = str(d.get("segment") or "").strip()
+            if seg.lower() in ("", "nan", "none"):
+                seg = "—"
 
-                cards = [
-                    ("إجمالي الطلبات", fmt_int(d["orders"]), None),
-                    ("الطلبات الموصلة في الوقت", fmt_int(d["orders_in_time"]), None),
-                    ("الطلبات المتأخرة", fmt_int(d["late_orders"]), None),
-                    ("Acceptance Rate", fmt_pct(d["acceptance_rate"]), None),
-                    ("On-Time (الأون تايم)", fmt_pct(d["on_time_rate"]), None),
-                    ("Verification (التحقق)", fmt_pct(d["verification_rate"]), None),
-                    ("Fail Order (الفيل أوردر)", fmt_pct(d["fail_rate"]), None),
-                    ("Final Quality Score", fmt_pct(d["final_score"]), None),
-                    ("Segment (السيجمنت)", seg, segment_color(seg)),
-                ]
-                cols = st.columns(3)
-                for i, (label, value, color) in enumerate(cards):
-                    style = f' style="color:{color};"' if color else ""
-                    with cols[i % 3]:
-                        st.markdown(f"""
-                        <div class="metric-card">
-                            <div class="metric-label">{html.escape(label)}</div>
-                            <div class="metric-value"{style}>{html.escape(value)}</div>
-                        </div>
-                        """, unsafe_allow_html=True)
+            st.markdown(f"""
+            <div class="profile">
+                <div class="profile-name">{html.escape(name)}</div>
+                <div class="profile-id">{html.escape(T["id_label"])}: {html.escape(str(d["rider_id"]))}</div>
+                <div style="margin-top:14px;color:#cbd5e1;font-size:13px;">{html.escape(T["segment"])}</div>
+                <div style="display:inline-block;min-width:76px;text-align:center;border-radius:14px;padding:10px 18px;font-size:25px;font-weight:900;margin-top:4px;background:{segment_color(seg)};color:#ffffff;">{html.escape(seg)}</div>
+            </div>
+            """, unsafe_allow_html=True)
 
-                st.markdown(
-                    '<div class="footer-note">Performance is based on the latest uploaded report.</div>',
-                    unsafe_allow_html=True,
-                )
+            st.markdown(f'<div class="section-title">{html.escape(T["overview"])}</div>',
+                        unsafe_allow_html=True)
+
+            cards = [
+                (T["orders"], fmt_int(d["orders"]), None),
+                (T["in_time"], fmt_int(d["orders_in_time"]), None),
+                (T["late"], fmt_int(d["late_orders"]), None),
+                (T["acceptance"], fmt_pct(d["acceptance_rate"]), None),
+                (T["on_time"], fmt_pct(d["on_time_rate"]), None),
+                (T["verification"], fmt_pct(d["verification_rate"]), None),
+                (T["fail"], fmt_pct(d["fail_rate"]), None),
+                (T["final"], fmt_pct(d["final_score"]), None),
+                (T["segment"], seg, segment_color(seg)),
+            ]
+            cols = st.columns(3)
+            for i, (label, value, color) in enumerate(cards):
+                style = f' style="color:{color};"' if color else ""
+                with cols[i % 3]:
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <div class="metric-label">{html.escape(label)}</div>
+                        <div class="metric-value"{style}>{html.escape(value)}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+            st.markdown(
+                f'<div class="footer-note">{html.escape(T["footer"])}</div>',
+                unsafe_allow_html=True,
+            )
 
 # ------------------------------------------------------------
 # Admin page
