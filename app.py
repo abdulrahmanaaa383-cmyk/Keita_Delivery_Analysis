@@ -251,28 +251,35 @@ st.markdown("""
 # ------------------------------------------------------------
 # Navigation
 # ------------------------------------------------------------
-if "page" not in st.session_state:
-    st.session_state["page"] = "Rider Performance"
+# الرابط العادي = صفحة الرايدر فقط (من غير أي زرار أدمن).
+# رابط الأدمن = نفس الرابط + ?admin  (مثال: https://your-app.streamlit.app/?admin)
+IS_ADMIN_LINK = "admin" in st.query_params
 
-n1, n2 = st.columns([3, 1])
-with n1:
-    if st.button("🏆 Rider Performance", use_container_width=True,
-                 type="primary" if st.session_state["page"] == "Rider Performance" else "secondary"):
-        st.session_state["page"] = "Rider Performance"
-        st.rerun()
-with n2:
-    if st.button("⚙️ Admin", use_container_width=True,
-                 type="primary" if st.session_state["page"] == "Admin" else "secondary"):
+if not IS_ADMIN_LINK:
+    page = "Rider Performance"
+else:
+    if "page" not in st.session_state:
         st.session_state["page"] = "Admin"
-        st.rerun()
 
-page = st.session_state["page"]
+    n1, n2 = st.columns([3, 1])
+    with n1:
+        if st.button("🏆 Rider Performance", use_container_width=True,
+                     type="primary" if st.session_state["page"] == "Rider Performance" else "secondary"):
+            st.session_state["page"] = "Rider Performance"
+            st.rerun()
+    with n2:
+        if st.button("⚙️ Admin", use_container_width=True,
+                     type="primary" if st.session_state["page"] == "Admin" else "secondary"):
+            st.session_state["page"] = "Admin"
+            st.rerun()
 
-if st.session_state.get("admin_ok") and page == "Admin":
-    if st.button("🚪 Logout", use_container_width=True):
-        st.session_state["admin_ok"] = False
-        st.session_state["page"] = "Rider Performance"
-        st.rerun()
+    page = st.session_state["page"]
+
+    if st.session_state.get("admin_ok") and page == "Admin":
+        if st.button("🚪 Logout", use_container_width=True):
+            st.session_state["admin_ok"] = False
+            st.session_state["page"] = "Rider Performance"
+            st.rerun()
 
 # ------------------------------------------------------------
 # Public page
