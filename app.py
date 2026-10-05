@@ -218,6 +218,10 @@ def admin_login():
 st.markdown("""
 <style>
     #MainMenu, footer, header {visibility: hidden;}
+    [data-testid="stToolbar"], [data-testid="stDecoration"], [data-testid="stStatusWidget"],
+    [data-testid="manage-app-button"], .stDeployButton,
+    [class*="viewerBadge"], [class*="_profileContainer"], [class*="_terminalButton"],
+    [class*="_container_gzau3"], [class*="_link_gzau3"] {display: none !important;}
     .block-container {max-width: 1000px; padding-top: 2rem; padding-bottom: 3rem;}
     .brand {text-align:center; margin-bottom:1.5rem;}
     .brand-icon {font-size:46px; line-height:1;}
