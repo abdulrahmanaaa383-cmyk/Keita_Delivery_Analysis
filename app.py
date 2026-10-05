@@ -313,24 +313,24 @@ if page == "Rider Performance":
                             unsafe_allow_html=True)
 
                 cards = [
-                    ("Completed Orders", fmt_int(d["orders"])),
-                    ("Orders In-Time", fmt_int(d["orders_in_time"])),
-                    ("Late Orders", fmt_int(d["late_orders"])),
-                    ("Failed Orders", fmt_int(d["failed_orders"])),
-                    ("Chat With Customer", fmt_pct(d["chat_rate"])),
-                    ("Acceptance Rate", fmt_pct(d["acceptance_rate"])),
-                    ("Verification", fmt_pct(d["verification_rate"])),
-                    ("On-Time Delivery", fmt_pct(d["on_time_rate"])),
-                    ("Fail Rate Score", fmt_pct(d["fail_rate"])),
-                    ("Final Delivery Quality Score", fmt_pct(d["final_score"])),
+                    ("إجمالي الطلبات", fmt_int(d["orders"]), None),
+                    ("الطلبات الموصلة في الوقت", fmt_int(d["orders_in_time"]), None),
+                    ("الطلبات المتأخرة", fmt_int(d["late_orders"]), None),
+                    ("Acceptance Rate", fmt_pct(d["acceptance_rate"]), None),
+                    ("On-Time (الأون تايم)", fmt_pct(d["on_time_rate"]), None),
+                    ("Verification (التحقق)", fmt_pct(d["verification_rate"]), None),
+                    ("Fail Order (الفيل أوردر)", fmt_pct(d["fail_rate"]), None),
+                    ("Final Quality Score", fmt_pct(d["final_score"]), None),
+                    ("Segment (السيجمنت)", seg, segment_color(seg)),
                 ]
                 cols = st.columns(3)
-                for i, (label, value) in enumerate(cards):
+                for i, (label, value, color) in enumerate(cards):
+                    style = f' style="color:{color};"' if color else ""
                     with cols[i % 3]:
                         st.markdown(f"""
                         <div class="metric-card">
                             <div class="metric-label">{html.escape(label)}</div>
-                            <div class="metric-value">{html.escape(value)}</div>
+                            <div class="metric-value"{style}>{html.escape(value)}</div>
                         </div>
                         """, unsafe_allow_html=True)
 
@@ -381,6 +381,8 @@ else:
             clean = build_clean_df(raw, mapping)
 
             if True:
+                seg_counts = clean["segment"].value_counts().to_dict()
+                st.caption("Segment في الملف: " + " | ".join(f"{k}: {v}" for k, v in seg_counts.items()))
                 st.dataframe(clean.drop(columns=["uploaded_at"]).head(20),
                              use_container_width=True, hide_index=True)
 
