@@ -86,11 +86,11 @@ def fmt_int(v):
         return "—"
 
 
-def segment_class(seg):
+def segment_color(seg):
     return {
-        "A": "seg-a", "B": "seg-b", "C": "seg-c",
-        "D": "seg-d", "E": "seg-e", "F": "seg-f",
-    }.get(str(seg).strip().upper(), "seg-other")
+        "A": "#16a34a", "B": "#2563eb", "C": "#f59e0b",
+        "D": "#f97316", "E": "#ef4444", "F": "#7f1d1d",
+    }.get(str(seg).strip().upper(), "#64748b")
 
 
 # ------------------------------------------------------------
@@ -175,7 +175,7 @@ def build_clean_df(raw, mapping):
         out[c] = to_pct_column(raw[mapping[c]]) if mapping[c] else 0.0
 
     out["segment"] = (
-        raw[mapping["segment"]].fillna("—").astype(str).str.strip()
+        raw[mapping["segment"]].fillna("—").astype(str).str.strip().replace("", "—")
         if mapping["segment"] else "—"
     )
 
@@ -296,13 +296,16 @@ if page == "Rider Performance":
                 st.error("No performance record was found for this Rider ID.")
             else:
                 name = (d.get("rider_name") or "").strip() or "Rider"
-                seg = str(d.get("segment", "—")).strip()
+                seg = str(d.get("segment") or "").strip()
+                if seg.lower() in ("", "nan", "none"):
+                    seg = "—"
 
                 st.markdown(f"""
                 <div class="profile">
                     <div class="profile-name">{html.escape(name)}</div>
                     <div class="profile-id">Rider ID: {html.escape(str(d["rider_id"]))}</div>
-                    <div class="segment {segment_class(seg)}">{html.escape(seg)}</div>
+                    <div style="margin-top:14px;color:#cbd5e1;font-size:13px;">Segment</div>
+                    <div style="display:inline-block;min-width:76px;text-align:center;border-radius:14px;padding:10px 18px;font-size:25px;font-weight:900;margin-top:4px;background:{segment_color(seg)};color:#ffffff;">{html.escape(seg)}</div>
                 </div>
                 """, unsafe_allow_html=True)
 
