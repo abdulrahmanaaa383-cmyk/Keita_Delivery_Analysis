@@ -1,310 +1,189 @@
-import streamlit as st
-import pandas as pd
-import sqlite3
-from pathlib import Path
-from datetime import datetime
-import hashlib
+import hmac
 import html
+import re
+import sqlite3
+from datetime import datetime
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
 
 # ============================================================
-# RIDER PERFORMANCE PORTAL
-# Public rider performance lookup + Admin Excel upload
+# RIDER PERFORMANCE PORTAL (simplified + flexible)
+# - كل رفع جديد بيمسح البيانات القديمة بالكامل
+# - بيحتاج 11 عمود بس، وبيتعرف عليهم تلقائيًا أو تختارهم يدوي
 # ============================================================
 
-st.set_page_config(
-    page_title="Rider Performance",
-    page_icon="🏆",
-    layout="centered",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title="Rider Performance", page_icon="🏆", layout="centered")
 
-BASE_DIR = Path(__file__).parent
-DB_PATH = BASE_DIR / "rider_performance.db"
+DB_PATH = Path(__file__).parent / "rider_performance.db"
+TABLE = "rider_stats"
 
-PERFORMANCE_COLUMNS = [
-    "Month",
-    "city_name",
-    "contract_name",
-    "rider_id",
-    "vehicle_type",
-    "total_verification_requests",
-    "successful_verification_requests",
-    "verification_success_rate",
-    "gross_orders",
-    "completed_orders",
-    "completed_orders_in_time",
-    "failed_orders_by_rider",
-    "on_time_delivery_score",
-    "fail_rate_score",
-    "final_delivery_quality_score",
-    "segment",
-]
-
-DISPLAY_NAMES = {
-    "Month": "Month",
-    "city_name": "City",
-    "contract_name": "Contract",
-    "rider_id": "Rider ID",
-    "vehicle_type": "Vehicle",
-    "total_verification_requests": "Verification Requests",
-    "successful_verification_requests": "Successful Verification",
-    "verification_success_rate": "Verification Score",
-    "gross_orders": "Gross Orders",
-    "completed_orders": "Completed Orders",
-    "completed_orders_in_time": "Completed Orders In-Time",
-    "late_orders": "Late Orders",
-    "failed_orders_by_rider": "Failed Orders",
-    "on_time_delivery_score": "On-Time Delivery Score",
-    "fail_rate_score": "Fail Rate Score",
-    "final_delivery_quality_score": "Final Delivery Quality Score",
-    "segment": "Segment",
+# field_key: (اسم العرض, إجباري؟, أسماء بديلة محتملة للعمود - بعد التنضيف)
+FIELDS = {
+    "rider_id":          ("Rider ID", True,  ["riderid", "id", "courierid", "driverid"]),
+    "rider_name":        ("Rider Name", False, ["ridername", "name", "couriername", "drivername"]),
+    "orders":            ("Orders (الطلبات)", False, ["orders", "completedorders", "grossorders", "totalorders"]),
+    "orders_in_time":    ("Orders In-Time (الموصلة في الوقت)", False,
+                          ["ordersintime", "completedordersintime", "ontimeorders", "deliveredintime"]),
+    "late_orders":       ("Late Orders (المتأخرة)", False, ["lateorders", "delayedorders"]),
+    "acceptance_rate":   ("Acceptance Rate", False,
+                          ["acceptancerate", "acceptance", "acceptrate", "exceptancerate", "exceptionrate"]),
+    "verification_rate": ("Verification %", False,
+                          ["verificationsuccessrate", "verificationrate", "verificationscore", "verification"]),
+    "on_time_rate":      ("On-Time %", False, ["ontimedeliveryscore", "ontimerate", "ontimescore", "ontime"]),
+    "fail_rate":         ("Fail Order %", False, ["failratescore", "failrate", "failorderrate", "failorder"]),
+    "final_score":       ("Final Delivery Quality Score", False,
+                          ["finaldeliveryqualityscore", "finalqualityscore", "finalscore", "quality"]),
+    "segment":           ("Segment", False, ["segment"]),
 }
 
-# ------------------------------------------------------------
-# DATABASE
-# ------------------------------------------------------------
+INT_COLS = ["orders", "orders_in_time", "late_orders"]
+PCT_COLS = ["acceptance_rate", "verification_rate", "on_time_rate", "fail_rate", "final_score"]
+NONE_OPTION = "— مفيش —"
 
+
+# ------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------
+def norm(text):
+    return re.sub(r"[\s_\-]+", "", str(text).strip().lower())
+
+
+def clean_id(series):
+    s = series.astype(str).str.strip()
+    return s.str.replace(r"\.0$", "", regex=True)
+
+
+def to_pct_column(series):
+    s = pd.to_numeric(series, errors="coerce").fillna(0.0)
+    # لو العمود كله بين 0 و 1 يبقى نسبة -> نحولها لـ 0-100
+    if len(s) and s.max() <= 1.0:
+        s = s * 100
+    return s
+
+
+def fmt_pct(v):
+    try:
+        return f"{float(v):.2f}%"
+    except Exception:
+        return "—"
+
+
+def fmt_int(v):
+    try:
+        return f"{int(v):,}"
+    except Exception:
+        return "—"
+
+
+def segment_class(seg):
+    return {
+        "A": "seg-a", "B": "seg-b", "C": "seg-c",
+        "D": "seg-d", "E": "seg-e", "F": "seg-f",
+    }.get(str(seg).strip().upper(), "seg-other")
+
+
+# ------------------------------------------------------------
+# Database
+# ------------------------------------------------------------
 def get_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    return conn
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 
-def init_db():
+def replace_all_data(df):
+    """يمسح القديم ويحط الجديد."""
     conn = get_conn()
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS riders (
-            rider_id TEXT PRIMARY KEY,
-            rider_name TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS performance (
-            rider_id TEXT NOT NULL,
-            month TEXT,
-            city_name TEXT,
-            contract_name TEXT,
-            vehicle_type TEXT,
-            total_verification_requests INTEGER,
-            successful_verification_requests INTEGER,
-            verification_success_rate REAL,
-            gross_orders INTEGER,
-            completed_orders INTEGER,
-            completed_orders_in_time INTEGER,
-            failed_orders_by_rider INTEGER,
-            on_time_delivery_score REAL,
-            fail_rate_score REAL,
-            final_delivery_quality_score REAL,
-            segment TEXT,
-            uploaded_at TEXT NOT NULL,
-            PRIMARY KEY (rider_id, month, contract_name)
-        )
-    """)
+    conn.execute("DROP TABLE IF EXISTS performance")  # جداول النسخة القديمة
+    conn.execute("DROP TABLE IF EXISTS riders")
+    df.to_sql(TABLE, conn, if_exists="replace", index=False)
     conn.commit()
     conn.close()
 
 
-def save_names(df):
-    if df.empty:
-        return 0
-
+def table_exists():
     conn = get_conn()
-    now = datetime.now().isoformat(timespec="seconds")
-    count = 0
-
-    for _, row in df.iterrows():
-        rider_id = str(row["rider_id"]).strip()
-        rider_name = str(row["rider_name"]).strip()
-
-        if not rider_id or not rider_name or rider_name.lower() == "nan":
-            continue
-
-        conn.execute("""
-            INSERT INTO riders (rider_id, rider_name, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(rider_id) DO UPDATE SET
-                rider_name = excluded.rider_name,
-                updated_at = excluded.updated_at
-        """, (rider_id, rider_name, now))
-        count += 1
-
-    conn.commit()
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (TABLE,)
+    ).fetchone()
     conn.close()
-    return count
+    return row is not None
 
 
-def load_names():
+def get_rider(rider_id):
+    if not table_exists():
+        return None
     conn = get_conn()
     df = pd.read_sql_query(
-        "SELECT rider_id, rider_name FROM riders ORDER BY rider_name",
-        conn
+        f"SELECT * FROM {TABLE} WHERE rider_id = ? LIMIT 1", conn, params=[rider_id]
     )
     conn.close()
-    return df
+    return None if df.empty else df.iloc[0].to_dict()
 
 
-def save_performance(df):
+def get_all():
+    if not table_exists():
+        return pd.DataFrame()
     conn = get_conn()
-    now = datetime.now().isoformat(timespec="seconds")
-
-    for _, row in df.iterrows():
-        vals = [
-            str(row.get("rider_id", "")).strip(),
-            str(row.get("Month", "")),
-            str(row.get("city_name", "")),
-            str(row.get("contract_name", "")),
-            str(row.get("vehicle_type", "")),
-            to_int(row.get("total_verification_requests")),
-            to_int(row.get("successful_verification_requests")),
-            to_float(row.get("verification_success_rate")),
-            to_int(row.get("gross_orders")),
-            to_int(row.get("completed_orders")),
-            to_int(row.get("completed_orders_in_time")),
-            to_int(row.get("failed_orders_by_rider")),
-            to_float(row.get("on_time_delivery_score")),
-            to_float(row.get("fail_rate_score")),
-            to_float(row.get("final_delivery_quality_score")),
-            str(row.get("segment", "")),
-            now,
-        ]
-
-        conn.execute("""
-            INSERT INTO performance (
-                rider_id, month, city_name, contract_name, vehicle_type,
-                total_verification_requests, successful_verification_requests,
-                verification_success_rate, gross_orders, completed_orders,
-                completed_orders_in_time, failed_orders_by_rider,
-                on_time_delivery_score, fail_rate_score,
-                final_delivery_quality_score, segment, uploaded_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(rider_id, month, contract_name) DO UPDATE SET
-                city_name = excluded.city_name,
-                vehicle_type = excluded.vehicle_type,
-                total_verification_requests = excluded.total_verification_requests,
-                successful_verification_requests = excluded.successful_verification_requests,
-                verification_success_rate = excluded.verification_success_rate,
-                gross_orders = excluded.gross_orders,
-                completed_orders = excluded.completed_orders,
-                completed_orders_in_time = excluded.completed_orders_in_time,
-                failed_orders_by_rider = excluded.failed_orders_by_rider,
-                on_time_delivery_score = excluded.on_time_delivery_score,
-                fail_rate_score = excluded.fail_rate_score,
-                final_delivery_quality_score = excluded.final_delivery_quality_score,
-                segment = excluded.segment,
-                uploaded_at = excluded.uploaded_at
-        """, vals)
-
-    conn.commit()
-    conn.close()
-
-
-def get_performance(rider_id):
-    conn = get_conn()
-
-    query = """
-        SELECT
-            p.*,
-            COALESCE(r.rider_name, '') AS rider_name
-        FROM performance p
-        LEFT JOIN riders r ON p.rider_id = r.rider_id
-        WHERE p.rider_id = ?
-        ORDER BY p.uploaded_at DESC
-        LIMIT 1
-    """
-
-    row = pd.read_sql_query(query, conn, params=[str(rider_id).strip()])
-    conn.close()
-
-    if row.empty:
-        return None
-
-    return row.iloc[0].to_dict()
-
-
-def get_all_performance():
-    conn = get_conn()
-    df = pd.read_sql_query("""
-        SELECT
-            p.*,
-            COALESCE(r.rider_name, '') AS rider_name
-        FROM performance p
-        LEFT JOIN riders r ON p.rider_id = r.rider_id
-        ORDER BY p.segment, p.rider_id
-    """, conn)
+    df = pd.read_sql_query(f"SELECT * FROM {TABLE} ORDER BY segment, rider_id", conn)
     conn.close()
     return df
 
 
-def to_int(value):
-    try:
-        if pd.isna(value) or value == "":
-            return 0
-        return int(float(value))
-    except Exception:
-        return 0
+# ------------------------------------------------------------
+# Upload logic
+# ------------------------------------------------------------
+def auto_map(columns):
+    """يرجّع {field_key: اسم العمود في الإكسيل أو None}"""
+    by_norm = {norm(c): c for c in columns}
+    mapping = {}
+    for key, (_, _, aliases) in FIELDS.items():
+        mapping[key] = next((by_norm[a] for a in aliases if a in by_norm), None)
+    return mapping
 
 
-def to_float(value):
-    try:
-        if pd.isna(value) or value == "":
-            return 0.0
-        return float(value)
-    except Exception:
-        return 0.0
+def build_clean_df(raw, mapping):
+    out = pd.DataFrame()
+    out["rider_id"] = clean_id(raw[mapping["rider_id"]])
 
+    if mapping["rider_name"]:
+        out["rider_name"] = raw[mapping["rider_name"]].fillna("").astype(str).str.strip()
+        out["rider_name"] = out["rider_name"].replace("nan", "")
+    else:
+        out["rider_name"] = ""
 
-def pct(value):
-    value = to_float(value)
-    # Source Excel uses 1.0 = 100%
-    if value <= 1.000001:
-        value *= 100
-    return f"{value:.2f}%"
+    for c in INT_COLS:
+        if mapping[c]:
+            out[c] = pd.to_numeric(raw[mapping[c]], errors="coerce").fillna(0).astype(int)
+        else:
+            out[c] = 0
 
+    # لو المتأخرة مش موجودة نحسبها
+    if not mapping["late_orders"]:
+        out["late_orders"] = (out["orders"] - out["orders_in_time"]).clip(lower=0)
 
-def score_class(value):
-    value = to_float(value)
-    if value >= 0.95:
-        return "excellent"
-    if value >= 0.85:
-        return "good"
-    if value >= 0.70:
-        return "warning"
-    return "bad"
+    for c in PCT_COLS:
+        out[c] = to_pct_column(raw[mapping[c]]) if mapping[c] else 0.0
 
+    out["segment"] = (
+        raw[mapping["segment"]].fillna("—").astype(str).str.strip()
+        if mapping["segment"] else "—"
+    )
 
-def segment_class(segment):
-    s = str(segment).strip().upper()
-    return {
-        "A": "seg-a",
-        "B": "seg-b",
-        "C": "seg-c",
-        "D": "seg-d",
-        "E": "seg-e",
-        "F": "seg-f",
-    }.get(s, "seg-other")
-
-
-def validate_performance_file(df):
-    missing = [c for c in PERFORMANCE_COLUMNS if c not in df.columns]
-    return missing
+    out = out[(out["rider_id"] != "") & (out["rider_id"].str.lower() != "nan")]
+    out = out.drop_duplicates(subset="rider_id", keep="last").reset_index(drop=True)
+    out["uploaded_at"] = datetime.now().isoformat(timespec="seconds")
+    return out
 
 
 # ------------------------------------------------------------
-# ADMIN AUTH
+# Admin auth
 # ------------------------------------------------------------
-
-def password_hash(value):
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
 def admin_password():
     try:
         return st.secrets["ADMIN_PASSWORD"]
     except Exception:
-        # Change this before production, or add ADMIN_PASSWORD
-        # to Streamlit Secrets.
-        return "ChangeMe123!"
+        return None
 
 
 def admin_login():
@@ -312,222 +191,71 @@ def admin_login():
         return True
 
     st.markdown("## 🔐 Admin")
-    st.caption("Enter the admin password to manage performance data.")
+    pwd = admin_password()
+    if pwd is None:
+        st.warning("مفيش ADMIN_PASSWORD في Secrets. ضيفه عشان الأدمن يشتغل.")
+        return False
 
     with st.form("admin_login"):
-        password = st.text_input("Password", type="password")
+        entered = st.text_input("Password", type="password")
         submit = st.form_submit_button("Login", use_container_width=True)
 
     if submit:
-        if password_hash(password) == password_hash(admin_password()):
+        if hmac.compare_digest(entered.encode(), pwd.encode()):
             st.session_state["admin_ok"] = True
             st.rerun()
         else:
             st.error("Incorrect password.")
-
     return False
 
 
 # ------------------------------------------------------------
-# UI CSS
+# CSS
 # ------------------------------------------------------------
-
 st.markdown("""
 <style>
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-
-    .block-container {
-        max-width: 1050px;
-        padding-top: 2rem;
-        padding-bottom: 3rem;
-    }
-
-    .brand {
-        text-align:center;
-        margin-bottom: 2rem;
-    }
-
-    .brand-icon {
-        font-size: 46px;
-        line-height: 1;
-        margin-bottom: 8px;
-    }
-
-    .brand-title {
-        font-size: 32px;
-        font-weight: 800;
-        letter-spacing: -0.7px;
-    }
-
-    .brand-subtitle {
-        color:#6b7280;
-        font-size:15px;
-        margin-top:5px;
-    }
-
-    .lookup-card {
-        background: linear-gradient(145deg,#ffffff,#f8fafc);
-        border:1px solid #e5e7eb;
-        border-radius:22px;
-        padding:28px;
-        box-shadow:0 10px 35px rgba(15,23,42,.07);
-        margin-bottom:25px;
-    }
-
-    .profile {
-        background: linear-gradient(145deg,#0f172a,#1e293b);
-        color:white;
-        border-radius:24px;
-        padding:30px;
-        margin-top:25px;
-        box-shadow:0 15px 45px rgba(15,23,42,.18);
-    }
-
-    .profile-name {
-        font-size:30px;
-        font-weight:800;
-    }
-
-    .profile-id {
-        color:#cbd5e1;
-        margin-top:4px;
-        font-size:14px;
-    }
-
-    .segment {
-        display:inline-block;
-        min-width:76px;
-        text-align:center;
-        border-radius:14px;
-        padding:10px 18px;
-        font-size:25px;
-        font-weight:900;
-        margin-top:15px;
-    }
-
-    .seg-a {background:#16a34a;color:#fff;}
-    .seg-b {background:#2563eb;color:#fff;}
-    .seg-c {background:#f59e0b;color:#fff;}
-    .seg-d {background:#f97316;color:#fff;}
-    .seg-e {background:#ef4444;color:#fff;}
-    .seg-f {background:#7f1d1d;color:#fff;}
+    #MainMenu, footer, header {visibility: hidden;}
+    .block-container {max-width: 1000px; padding-top: 2rem; padding-bottom: 3rem;}
+    .brand {text-align:center; margin-bottom:1.5rem;}
+    .brand-icon {font-size:46px; line-height:1;}
+    .brand-title {font-size:32px; font-weight:800; letter-spacing:-.7px;}
+    .brand-subtitle {color:#6b7280; font-size:15px; margin-top:5px;}
+    .profile {background:linear-gradient(145deg,#0f172a,#1e293b); color:#fff;
+              border-radius:24px; padding:30px; margin-top:25px;
+              box-shadow:0 15px 45px rgba(15,23,42,.18);}
+    .profile-name {font-size:30px; font-weight:800;}
+    .profile-id {color:#cbd5e1; margin-top:4px; font-size:14px;}
+    .segment {display:inline-block; min-width:76px; text-align:center; border-radius:14px;
+              padding:10px 18px; font-size:25px; font-weight:900; margin-top:15px;}
+    .seg-a {background:#16a34a;color:#fff;} .seg-b {background:#2563eb;color:#fff;}
+    .seg-c {background:#f59e0b;color:#fff;} .seg-d {background:#f97316;color:#fff;}
+    .seg-e {background:#ef4444;color:#fff;} .seg-f {background:#7f1d1d;color:#fff;}
     .seg-other {background:#64748b;color:#fff;}
-
-    .metric-card {
-        background:white;
-        border:1px solid #e5e7eb;
-        border-radius:18px;
-        padding:18px;
-        min-height:110px;
-        box-shadow:0 5px 18px rgba(15,23,42,.04);
-    }
-
-    .metric-label {
-        color:#64748b;
-        font-size:13px;
-        font-weight:600;
-        margin-bottom:8px;
-    }
-
-    .metric-value {
-        color:#0f172a;
-        font-size:25px;
-        font-weight:800;
-    }
-
-    .metric-small {
-        color:#64748b;
-        font-size:12px;
-        margin-top:5px;
-    }
-
-    .section-title {
-        font-size:20px;
-        font-weight:800;
-        margin:30px 0 14px;
-    }
-
-    .info-line {
-        background:#f8fafc;
-        border:1px solid #e5e7eb;
-        border-radius:13px;
-        padding:12px 15px;
-        margin-bottom:8px;
-    }
-
-    .admin-box {
-        background:#f8fafc;
-        border:1px solid #e2e8f0;
-        border-radius:18px;
-        padding:22px;
-        margin-bottom:20px;
-    }
-
-    .footer-note {
-        text-align:center;
-        color:#94a3b8;
-        font-size:12px;
-        margin-top:35px;
-    }
-
-    @media (max-width: 700px) {
-        .brand-title {font-size:26px;}
-        .profile {padding:22px;}
-        .profile-name {font-size:24px;}
-    }
+    .metric-card {background:#fff; border:1px solid #e5e7eb; border-radius:18px;
+                  padding:18px; min-height:105px; margin-bottom:12px;
+                  box-shadow:0 5px 18px rgba(15,23,42,.04);}
+    .metric-label {color:#64748b; font-size:13px; font-weight:600; margin-bottom:8px;}
+    .metric-value {color:#0f172a; font-size:25px; font-weight:800;}
+    .section-title {font-size:20px; font-weight:800; margin:30px 0 14px;}
+    .footer-note {text-align:center; color:#94a3b8; font-size:12px; margin-top:35px;}
 </style>
 """, unsafe_allow_html=True)
 
-init_db()
-
-
 # ------------------------------------------------------------
-# NAVIGATION / ADMIN
+# Navigation
 # ------------------------------------------------------------
-
-# Keep the selected page in session state so Admin is always reachable
-# from the main screen, even if the sidebar is collapsed.
 if "page" not in st.session_state:
     st.session_state["page"] = "Rider Performance"
 
-st.markdown("""
-<style>
-    .top-nav {
-        display:flex;
-        justify-content:center;
-        gap:12px;
-        margin:0 auto 25px auto;
-        max-width:1050px;
-    }
-    .admin-access-note {
-        text-align:center;
-        color:#64748b;
-        font-size:12px;
-        margin-top:-15px;
-        margin-bottom:20px;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-nav1, nav2 = st.columns([3, 1])
-
-with nav1:
-    if st.button(
-        "🏆 Rider Performance",
-        use_container_width=True,
-        type="primary" if st.session_state["page"] == "Rider Performance" else "secondary"
-    ):
+n1, n2 = st.columns([3, 1])
+with n1:
+    if st.button("🏆 Rider Performance", use_container_width=True,
+                 type="primary" if st.session_state["page"] == "Rider Performance" else "secondary"):
         st.session_state["page"] = "Rider Performance"
         st.rerun()
-
-with nav2:
-    if st.button(
-        "⚙️ Admin",
-        use_container_width=True,
-        type="primary" if st.session_state["page"] == "Admin" else "secondary"
-    ):
+with n2:
+    if st.button("⚙️ Admin", use_container_width=True,
+                 type="primary" if st.session_state["page"] == "Admin" else "secondary"):
         st.session_state["page"] = "Admin"
         st.rerun()
 
@@ -539,13 +267,10 @@ if st.session_state.get("admin_ok") and page == "Admin":
         st.session_state["page"] = "Rider Performance"
         st.rerun()
 
-
 # ------------------------------------------------------------
-# PUBLIC RIDER PERFORMANCE
+# Public page
 # ------------------------------------------------------------
-
 if page == "Rider Performance":
-
     st.markdown("""
     <div class="brand">
         <div class="brand-icon">🏆</div>
@@ -554,75 +279,44 @@ if page == "Rider Performance":
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown(
-        '<div class="admin-access-note">⚙️ Admin access is available from the button above.</div>',
-        unsafe_allow_html=True
-    )
-
-    st.markdown('<div class="lookup-card">', unsafe_allow_html=True)
-
     with st.form("rider_lookup"):
-        rider_id = st.text_input(
-            "Rider ID",
-            placeholder="Enter your Rider ID",
-            label_visibility="visible"
-        ).strip()
-
-        search = st.form_submit_button(
-            "View My Performance",
-            use_container_width=True,
-            type="primary"
-        )
-
-    st.markdown("</div>", unsafe_allow_html=True)
+        rider_id = st.text_input("Rider ID", placeholder="Enter your Rider ID").strip()
+        search = st.form_submit_button("View My Performance", use_container_width=True, type="primary")
 
     if search:
+        rider_id = re.sub(r"\.0$", "", rider_id)
         if not rider_id:
             st.warning("Please enter your Rider ID.")
         else:
-            data = get_performance(rider_id)
-
-            if data is None:
+            d = get_rider(rider_id)
+            if d is None:
                 st.error("No performance record was found for this Rider ID.")
             else:
-                name = data.get("rider_name", "").strip()
-                if not name:
-                    name = "Rider"
-
-                segment = str(data.get("segment", "—")).strip()
+                name = (d.get("rider_name") or "").strip() or "Rider"
+                seg = str(d.get("segment", "—")).strip()
 
                 st.markdown(f"""
                 <div class="profile">
                     <div class="profile-name">{html.escape(name)}</div>
-                    <div class="profile-id">
-                        Rider ID: {html.escape(str(data.get("rider_id", rider_id)))}
-                    </div>
-                    <div class="segment {segment_class(segment)}">
-                        {html.escape(segment)}
-                    </div>
+                    <div class="profile-id">Rider ID: {html.escape(str(d["rider_id"]))}</div>
+                    <div class="segment {segment_class(seg)}">{html.escape(seg)}</div>
                 </div>
                 """, unsafe_allow_html=True)
 
                 st.markdown('<div class="section-title">📊 Performance Overview</div>',
                             unsafe_allow_html=True)
 
-                cols = st.columns(3)
-
                 cards = [
-                    ("Verification Score", pct(data.get("verification_success_rate"))),
-                    ("On-Time Delivery Score", pct(data.get("on_time_delivery_score"))),
-                    ("Fail Rate Score", pct(data.get("fail_rate_score"))),
-                    ("Final Delivery Quality Score", pct(data.get("final_delivery_quality_score"))),
-                    ("Gross Orders", f"{to_int(data.get('gross_orders')):,}"),
-                    ("Completed Orders", f"{to_int(data.get('completed_orders')):,}"),
-                    ("Completed Orders In-Time", f"{to_int(data.get('completed_orders_in_time')):,}"),
-                    (
-                        "Late Orders",
-                        f"{max(0, to_int(data.get('completed_orders')) - to_int(data.get('completed_orders_in_time'))):,}"
-                    ),
-                    ("Failed Orders", f"{to_int(data.get('failed_orders_by_rider')):,}"),
+                    ("Orders", fmt_int(d["orders"])),
+                    ("Orders In-Time", fmt_int(d["orders_in_time"])),
+                    ("Late Orders", fmt_int(d["late_orders"])),
+                    ("Acceptance Rate", fmt_pct(d["acceptance_rate"])),
+                    ("Verification", fmt_pct(d["verification_rate"])),
+                    ("On-Time Delivery", fmt_pct(d["on_time_rate"])),
+                    ("Fail Order Rate", fmt_pct(d["fail_rate"])),
+                    ("Final Delivery Quality Score", fmt_pct(d["final_score"])),
                 ]
-
+                cols = st.columns(3)
                 for i, (label, value) in enumerate(cards):
                     with cols[i % 3]:
                         st.markdown(f"""
@@ -632,235 +326,85 @@ if page == "Rider Performance":
                         </div>
                         """, unsafe_allow_html=True)
 
-                st.markdown('<div class="section-title">🔎 Full Performance Details</div>',
-                            unsafe_allow_html=True)
-
-                details = [
-                    ("Month", data.get("month") or data.get("Month") or "—"),
-                    ("City", data.get("city_name", "—")),
-                    ("Contract", data.get("contract_name", "—")),
-                    ("Vehicle", data.get("vehicle_type", "—")),
-                    ("Verification Requests", f"{to_int(data.get('total_verification_requests')):,}"),
-                    ("Successful Verification", f"{to_int(data.get('successful_verification_requests')):,}"),
-                ]
-
-                for label, value in details:
-                    st.markdown(f"""
-                    <div class="info-line">
-                        <strong>{html.escape(label)}</strong>
-                        <span style="float:right">{html.escape(str(value))}</span>
-                    </div>
-                    """, unsafe_allow_html=True)
-
                 st.markdown(
                     '<div class="footer-note">Performance is based on the latest uploaded report.</div>',
-                    unsafe_allow_html=True
+                    unsafe_allow_html=True,
                 )
 
-
 # ------------------------------------------------------------
-# ADMIN
+# Admin page
 # ------------------------------------------------------------
-
 else:
     if not admin_login():
         st.stop()
 
     st.title("⚙️ Performance Admin")
-    st.caption("Upload the latest performance report and manage rider names.")
+    tab_upload, tab_data = st.tabs(["📥 Upload", "📊 Current Data"])
 
-    tabs = st.tabs([
-        "📥 Upload Performance",
-        "👤 Rider Names",
-        "📊 Current Data"
-    ])
+    with tab_upload:
+        st.info("⚠️ أي رفع جديد هيمسح كل البيانات القديمة ويحط الملف الجديد مكانها.")
 
-    # --------------------------------------------------------
-    # Upload performance
-    # --------------------------------------------------------
-    with tabs[0]:
-        st.markdown('<div class="admin-box">', unsafe_allow_html=True)
-
-        st.subheader("Upload Excel Performance Report")
-
-        uploaded = st.file_uploader(
-            "Excel file",
-            type=["xlsx", "xls"],
-            help="Upload the 3PL Delivery Quality Segmentation report."
-        )
+        uploaded = st.file_uploader("Excel / CSV file", type=["xlsx", "xls", "csv"])
 
         if uploaded:
             try:
-                df = pd.read_excel(uploaded)
-
-                missing = validate_performance_file(df)
-
-                if missing:
-                    st.error("Missing required columns:")
-                    st.code("\n".join(missing))
+                if uploaded.name.lower().endswith(".csv"):
+                    raw = pd.read_csv(uploaded)
                 else:
-                    st.success(f"File loaded successfully — {len(df):,} rows found.")
-
-                    st.dataframe(
-                        df[PERFORMANCE_COLUMNS].head(20),
-                        use_container_width=True,
-                        hide_index=True
-                    )
-
-                    if st.button(
-                        "💾 Import / Update Performance",
-                        type="primary",
-                        use_container_width=True
-                    ):
-                        clean = df[PERFORMANCE_COLUMNS].copy()
-
-                        clean["rider_id"] = clean["rider_id"].astype(str).str.strip()
-
-                        # Remove empty IDs
-                        clean = clean[
-                            (clean["rider_id"] != "") &
-                            (clean["rider_id"].str.lower() != "nan")
-                        ].copy()
-
-                        save_performance(clean)
-
-                        # If the Excel later contains rider_name,
-                        # automatically save it as well.
-                        if "rider_name" in df.columns:
-                            name_df = df[["rider_id", "rider_name"]].copy()
-                            name_df["rider_id"] = name_df["rider_id"].astype(str).str.strip()
-                            name_df["rider_name"] = name_df["rider_name"].astype(str).str.strip()
-                            save_names(name_df)
-
-                        st.success(
-                            f"✅ Performance updated successfully for {len(clean):,} riders."
-                        )
-
+                    raw = pd.read_excel(uploaded)
             except Exception as e:
-                st.error(f"Could not read the Excel file: {e}")
+                st.error(f"Could not read the file: {e}")
+                st.stop()
 
-        st.markdown("</div>", unsafe_allow_html=True)
+            st.success(f"File loaded — {len(raw):,} rows, {len(raw.columns)} columns.")
 
-        st.info(
-            "Your current report uses the exact performance columns from the uploaded "
-            "3PL Delivery Quality Segmentation file."
-        )
+            detected = auto_map(raw.columns)
+            options = [NONE_OPTION] + list(raw.columns)
 
-    # --------------------------------------------------------
-    # Rider names
-    # --------------------------------------------------------
-    with tabs[1]:
-        st.subheader("👤 Rider Names")
+            with st.expander("🔗 ربط الأعمدة (اتعمل تلقائي — عدّل لو في حاجة غلط)", expanded=False):
+                mapping = {}
+                for key, (label, required, _) in FIELDS.items():
+                    default = detected[key]
+                    idx = options.index(default) if default in options else 0
+                    choice = st.selectbox(
+                        f"{label}{' *' if required else ''}",
+                        options,
+                        index=idx,
+                        key=f"map_{key}",
+                    )
+                    mapping[key] = None if choice == NONE_OPTION else choice
 
-        st.caption(
-            "The current performance Excel contains Rider ID but no rider name. "
-            "Add the name here once; it will be shown on the public performance page."
-        )
-
-        with st.form("add_name"):
-            c1, c2 = st.columns(2)
-            rid = c1.text_input("Rider ID")
-            rname = c2.text_input("Rider Name")
-
-            save = st.form_submit_button(
-                "Save Rider Name",
-                type="primary",
-                use_container_width=True
-            )
-
-        if save:
-            if not rid.strip() or not rname.strip():
-                st.error("Rider ID and Rider Name are required.")
+            if not mapping["rider_id"]:
+                st.error("لازم تختار عمود Rider ID.")
             else:
-                save_names(pd.DataFrame([{
-                    "rider_id": rid.strip(),
-                    "rider_name": rname.strip()
-                }]))
-                st.success("✅ Rider name saved.")
+                clean = build_clean_df(raw, mapping)
 
-        st.divider()
+                missing = [FIELDS[k][0] for k, v in mapping.items() if v is None and k != "late_orders"]
+                if missing:
+                    st.warning("أعمدة مش موجودة (هتظهر صفر/فاضية): " + "، ".join(missing))
+                if not mapping["late_orders"]:
+                    st.caption("Late Orders هتتحسب = Orders - Orders In-Time")
 
-        st.markdown("#### Bulk name upload (optional)")
+                st.dataframe(clean.drop(columns=["uploaded_at"]).head(20),
+                             use_container_width=True, hide_index=True)
 
-        names_file = st.file_uploader(
-            "Upload Excel/CSV with rider_id and rider_name",
-            type=["xlsx", "xls", "csv"],
-            key="names_file"
-        )
+                if st.button("💾 مسح القديم ورفع الجديد", type="primary", use_container_width=True):
+                    replace_all_data(clean)
+                    st.success(f"✅ تم. البيانات القديمة اتمسحت واتحمّل {len(clean):,} رايدر.")
 
-        if names_file:
-            try:
-                if names_file.name.lower().endswith(".csv"):
-                    names_df = pd.read_csv(names_file)
-                else:
-                    names_df = pd.read_excel(names_file)
-
-                if "rider_id" not in names_df.columns or "rider_name" not in names_df.columns:
-                    st.error("The file must contain: rider_id and rider_name")
-                else:
-                    st.dataframe(
-                        names_df[["rider_id", "rider_name"]].head(20),
-                        use_container_width=True,
-                        hide_index=True
-                    )
-
-                    if st.button(
-                        "Import Names",
-                        type="primary",
-                        use_container_width=True
-                    ):
-                        n = save_names(names_df[["rider_id", "rider_name"]])
-                        st.success(f"✅ Saved {n:,} rider names.")
-
-            except Exception as e:
-                st.error(f"Could not read names file: {e}")
-
-        current_names = load_names()
-
-        if not current_names.empty:
-            st.markdown("#### Saved names")
-            st.dataframe(
-                current_names,
-                use_container_width=True,
-                hide_index=True
-            )
-
-    # --------------------------------------------------------
-    # Current data
-    # --------------------------------------------------------
-    with tabs[2]:
-        st.subheader("📊 Current Performance Data")
-
-        current = get_all_performance()
-
+    with tab_data:
+        current = get_all()
         if current.empty:
-            st.info("No performance data has been uploaded yet.")
+            st.info("No data uploaded yet.")
         else:
-            st.metric("Riders", f"{current['rider_id'].nunique():,}")
-
-            show_cols = [
-                "rider_id",
-                "rider_name",
-                "gross_orders",
-                "completed_orders",
-                "completed_orders_in_time",
-                "failed_orders_by_rider",
-                "on_time_delivery_score",
-                "fail_rate_score",
-                "final_delivery_quality_score",
-                "segment",
-            ]
-
-            st.dataframe(
-                current[show_cols],
-                use_container_width=True,
-                hide_index=True
-            )
-
+            st.metric("Riders", f"{len(current):,}")
+            st.caption(f"آخر رفع: {current['uploaded_at'].iloc[0]}")
+            st.dataframe(current.drop(columns=["uploaded_at"]),
+                         use_container_width=True, hide_index=True)
             st.download_button(
                 "📥 Download Current Data",
                 data=current.to_csv(index=False).encode("utf-8-sig"),
                 file_name="rider_performance_current.csv",
                 mime="text/csv",
-                use_container_width=True
+                use_container_width=True,
             )
