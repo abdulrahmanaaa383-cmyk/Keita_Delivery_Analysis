@@ -15,7 +15,7 @@ st.set_page_config(
     page_title="Rider Performance",
     page_icon="🏆",
     layout="centered",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 BASE_DIR = Path(__file__).parent
@@ -484,21 +484,60 @@ init_db()
 
 
 # ------------------------------------------------------------
-# SIDEBAR / ADMIN
+# NAVIGATION / ADMIN
 # ------------------------------------------------------------
 
-with st.sidebar:
-    st.markdown("### ⚙️ System")
-    page = st.radio(
-        "Open",
-        ["Rider Performance", "Admin"],
-        label_visibility="collapsed"
-    )
+# Keep the selected page in session state so Admin is always reachable
+# from the main screen, even if the sidebar is collapsed.
+if "page" not in st.session_state:
+    st.session_state["page"] = "Rider Performance"
 
-    if st.session_state.get("admin_ok"):
-        if st.button("Logout", use_container_width=True):
-            st.session_state["admin_ok"] = False
-            st.rerun()
+st.markdown("""
+<style>
+    .top-nav {
+        display:flex;
+        justify-content:center;
+        gap:12px;
+        margin:0 auto 25px auto;
+        max-width:1050px;
+    }
+    .admin-access-note {
+        text-align:center;
+        color:#64748b;
+        font-size:12px;
+        margin-top:-15px;
+        margin-bottom:20px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+nav1, nav2 = st.columns([3, 1])
+
+with nav1:
+    if st.button(
+        "🏆 Rider Performance",
+        use_container_width=True,
+        type="primary" if st.session_state["page"] == "Rider Performance" else "secondary"
+    ):
+        st.session_state["page"] = "Rider Performance"
+        st.rerun()
+
+with nav2:
+    if st.button(
+        "⚙️ Admin",
+        use_container_width=True,
+        type="primary" if st.session_state["page"] == "Admin" else "secondary"
+    ):
+        st.session_state["page"] = "Admin"
+        st.rerun()
+
+page = st.session_state["page"]
+
+if st.session_state.get("admin_ok") and page == "Admin":
+    if st.button("🚪 Logout", use_container_width=True):
+        st.session_state["admin_ok"] = False
+        st.session_state["page"] = "Rider Performance"
+        st.rerun()
 
 
 # ------------------------------------------------------------
@@ -514,6 +553,11 @@ if page == "Rider Performance":
         <div class="brand-subtitle">Check your delivery performance</div>
     </div>
     """, unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="admin-access-note">⚙️ Admin access is available from the button above.</div>',
+        unsafe_allow_html=True
+    )
 
     st.markdown('<div class="lookup-card">', unsafe_allow_html=True)
 
