@@ -189,10 +189,7 @@ def build_clean_df(raw, mapping):
 # Admin auth
 # ------------------------------------------------------------
 def admin_password():
-    try:
-        return st.secrets["ADMIN_PASSWORD"]
-    except Exception:
-        return None
+    return "admin 444"
 
 
 def admin_login():
@@ -201,9 +198,6 @@ def admin_login():
 
     st.markdown("## 🔐 Admin")
     pwd = admin_password()
-    if pwd is None:
-        st.warning("مفيش ADMIN_PASSWORD في Secrets. ضيفه عشان الأدمن يشتغل.")
-        return False
 
     with st.form("admin_login"):
         entered = st.text_input("Password", type="password")
@@ -369,33 +363,21 @@ else:
 
             st.success(f"File loaded — {len(raw):,} rows, {len(raw.columns)} columns.")
 
-            detected = auto_map(raw.columns)
-            options = [NONE_OPTION] + list(raw.columns)
+            mapping = auto_map(raw.columns)
+            missing = [FIELDS[k][0] for k, v in mapping.items() if v is None]
 
-            with st.expander("🔗 ربط الأعمدة (اتعمل تلقائي — عدّل لو في حاجة غلط)", expanded=False):
-                mapping = {}
-                for key, (label, required, _) in FIELDS.items():
-                    default = detected[key]
-                    idx = options.index(default) if default in options else 0
-                    choice = st.selectbox(
-                        f"{label}{' *' if required else ''}",
-                        options,
-                        index=idx,
-                        key=f"map_{key}",
-                    )
-                    mapping[key] = None if choice == NONE_OPTION else choice
+            if missing:
+                st.error("الملف ناقصه أعمدة: " + "، ".join(missing))
+                st.caption("الأعمدة المطلوبة: " + " | ".join(
+                    ["rider_id", "Name", "chat with customer", "acceptance rate",
+                     "verification_success_rate", "completed_orders", "completed_orders_in_time",
+                     "Orders late", "failed_orders_by_rider", "on_time_delivery_score",
+                     "fail_rate_score", "final_delivery_quality_score", "segment"]))
+                st.stop()
 
-            if not mapping["rider_id"]:
-                st.error("لازم تختار عمود Rider ID.")
-            else:
-                clean = build_clean_df(raw, mapping)
+            clean = build_clean_df(raw, mapping)
 
-                missing = [FIELDS[k][0] for k, v in mapping.items() if v is None and k != "late_orders"]
-                if missing:
-                    st.warning("أعمدة مش موجودة (هتظهر صفر/فاضية): " + "، ".join(missing))
-                if not mapping["late_orders"]:
-                    st.caption("Late Orders هتتحسب = Orders - Orders In-Time")
-
+            if True:
                 st.dataframe(clean.drop(columns=["uploaded_at"]).head(20),
                              use_container_width=True, hide_index=True)
 
