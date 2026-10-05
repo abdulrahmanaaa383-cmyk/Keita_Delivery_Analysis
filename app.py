@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 # ============================================================
 # RIDER PERFORMANCE PORTAL (simplified + flexible)
@@ -247,6 +248,37 @@ st.markdown("""
     .footer-note {text-align:center; color:#94a3b8; font-size:12px; margin-top:35px;}
 </style>
 """, unsafe_allow_html=True)
+
+# محاولة إخفاء أزرار Streamlit Cloud (اللوجو + صورة الحساب) أسفل الصفحة.
+components.html("""
+<script>
+(function () {
+  const SELECTORS = [
+    '[class*="viewerBadge"]', '[class*="_profileContainer"]', '[class*="_terminalButton"]',
+    '[class*="_container_gzau3"]', '[class*="_link_gzau3"]', '[data-testid="manage-app-button"]'
+  ];
+  function hideIn(doc, aggressive) {
+    try {
+      SELECTORS.forEach(s => doc.querySelectorAll(s).forEach(e => e.style.setProperty('display', 'none', 'important')));
+      if (aggressive) {
+        doc.querySelectorAll('body *').forEach(e => {
+          const cs = doc.defaultView.getComputedStyle(e);
+          if (cs.position === 'fixed' && parseFloat(cs.bottom) <= 30 && parseFloat(cs.right) <= 30) {
+            e.style.setProperty('display', 'none', 'important');
+          }
+        });
+      }
+    } catch (err) {}
+  }
+  function run() {
+    try { hideIn(window.parent.document, false); } catch (e) {}
+    try { hideIn(window.top.document, true); } catch (e) {}
+  }
+  run();
+  setInterval(run, 800);
+})();
+</script>
+""", height=0)
 
 # ------------------------------------------------------------
 # Navigation
