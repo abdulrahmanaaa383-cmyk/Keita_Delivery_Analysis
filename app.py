@@ -26,7 +26,9 @@ FIELDS = {
     "orders":            ("Orders (الطلبات)", False, ["orders", "completedorders", "grossorders", "totalorders"]),
     "orders_in_time":    ("Orders In-Time (الموصلة في الوقت)", False,
                           ["ordersintime", "completedordersintime", "ontimeorders", "deliveredintime"]),
-    "late_orders":       ("Late Orders (المتأخرة)", False, ["lateorders", "delayedorders"]),
+    "late_orders":       ("Late Orders (المتأخرة)", False, ["orderslate", "lateorders", "delayedorders"]),
+    "failed_orders":     ("Failed Orders (failed_orders_by_rider)", False, ["failedordersbyrider", "failedorders"]),
+    "chat_rate":         ("Chat With Customer", False, ["chatwithcustomer", "chatrate", "chat"]),
     "acceptance_rate":   ("Acceptance Rate", False,
                           ["acceptancerate", "acceptance", "acceptrate", "exceptancerate", "exceptionrate"]),
     "verification_rate": ("Verification %", False,
@@ -38,8 +40,8 @@ FIELDS = {
     "segment":           ("Segment", False, ["segment"]),
 }
 
-INT_COLS = ["orders", "orders_in_time", "late_orders"]
-PCT_COLS = ["acceptance_rate", "verification_rate", "on_time_rate", "fail_rate", "final_score"]
+INT_COLS = ["orders", "orders_in_time", "late_orders", "failed_orders"]
+PCT_COLS = ["chat_rate", "acceptance_rate", "verification_rate", "on_time_rate", "fail_rate", "final_score"]
 NONE_OPTION = "— مفيش —"
 
 
@@ -56,6 +58,13 @@ def clean_id(series):
 
 
 def to_pct_column(series):
+    # لو القيم نصوص فيها علامة % (زي "57.14%") نشيلها ونعتبرها 0-100 جاهزة
+    if series.dtype == object:
+        txt = series.astype(str)
+        if txt.str.contains("%", regex=False).any():
+            return pd.to_numeric(
+                txt.str.replace("%", "", regex=False).str.strip(), errors="coerce"
+            ).fillna(0.0)
     s = pd.to_numeric(series, errors="coerce").fillna(0.0)
     # لو العمود كله بين 0 و 1 يبقى نسبة -> نحولها لـ 0-100
     if len(s) and s.max() <= 1.0:
@@ -307,13 +316,15 @@ if page == "Rider Performance":
                             unsafe_allow_html=True)
 
                 cards = [
-                    ("Orders", fmt_int(d["orders"])),
+                    ("Completed Orders", fmt_int(d["orders"])),
                     ("Orders In-Time", fmt_int(d["orders_in_time"])),
                     ("Late Orders", fmt_int(d["late_orders"])),
+                    ("Failed Orders", fmt_int(d["failed_orders"])),
+                    ("Chat With Customer", fmt_pct(d["chat_rate"])),
                     ("Acceptance Rate", fmt_pct(d["acceptance_rate"])),
                     ("Verification", fmt_pct(d["verification_rate"])),
                     ("On-Time Delivery", fmt_pct(d["on_time_rate"])),
-                    ("Fail Order Rate", fmt_pct(d["fail_rate"])),
+                    ("Fail Rate Score", fmt_pct(d["fail_rate"])),
                     ("Final Delivery Quality Score", fmt_pct(d["final_score"])),
                 ]
                 cols = st.columns(3)
