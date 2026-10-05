@@ -1,1054 +1,822 @@
-"""
-🛵 Rider Tracker — نظام تراكنج المناديب (ملف واحد)
-=====================================================
-كل السيستم في ملف بايثون واحد عشان سهل رفعه على Streamlit Community Cloud.
-محتاج جنبه في نفس الـ repo:
-  - requirements.txt
-  - users.yaml               (بيانات تسجيل الدخول)
-  - .streamlit/secrets.toml  (مفاتيح Hunger Station API + Google Sheets — تضيفها لما تجهز)
-
-الأقسام في الملف ده (دور عليها بالتعليقات الكبيرة):
-  1) DATABASE (SQLite)          — تخزين المناديب والطلبات
-  2) AUTH                       — تسجيل الدخول والصلاحيات
-  3) HUNGER STATION API CLIENT  — لما يوصلك API رسمي من هنجر ستيشن
-  3B) LIVE SCRAPER               — حل مؤقت: دخول بحسابك وسحب البيانات لايف
-  4) GOOGLE SHEETS SYNC         — تغذية Looker Studio
-  5) ANALYSIS                   — كل حسابات الأداء
-  6) EXCEL EXPORT                — تصدير كل التقارير في ملف واحد
-  7) STREAMLIT UI                — الواجهة نفسها
-"""
-
-import sqlite3
-import io
-from io import BytesIO
-from pathlib import Path
-from datetime import date, datetime, timedelta
-
-import pandas as pd
 import streamlit as st
-import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
+import pandas as pd
+import sqlite3
+from pathlib import Path
+from datetime import datetime
+import hashlib
+import html
 
-try:
-    from streamlit_autorefresh import st_autorefresh
-    AUTOREFRESH_AVAILABLE = True
-except ImportError:
-    AUTOREFRESH_AVAILABLE = False
-import plotly.express as px
+# ============================================================
+# RIDER PERFORMANCE PORTAL
+# Public rider performance lookup + Admin Excel upload
+# ============================================================
 
-st.set_page_config(page_title="Rider Tracker", page_icon="🛵", layout="wide")
+st.set_page_config(
+    page_title="Rider Performance",
+    page_icon="🏆",
+    layout="centered",
+    initial_sidebar_state="collapsed",
+)
 
-# ════════════════════════════════════════════════════════════════════════
-# 1) DATABASE (SQLite) — المصدر الحقيقي للبيانات
-# ════════════════════════════════════════════════════════════════════════
-DB_PATH = Path(__file__).parent / "data" / "tracker.db"
-DB_PATH.parent.mkdir(exist_ok=True)
+BASE_DIR = Path(__file__).parent
+DB_PATH = BASE_DIR / "rider_performance.db"
 
+PERFORMANCE_COLUMNS = [
+    "Month",
+    "city_name",
+    "contract_name",
+    "rider_id",
+    "vehicle_type",
+    "total_verification_requests",
+    "successful_verification_requests",
+    "verification_success_rate",
+    "gross_orders",
+    "completed_orders",
+    "completed_orders_in_time",
+    "failed_orders_by_rider",
+    "on_time_delivery_score",
+    "fail_rate_score",
+    "final_delivery_quality_score",
+    "segment",
+]
+
+DISPLAY_NAMES = {
+    "Month": "Month",
+    "city_name": "City",
+    "contract_name": "Contract",
+    "rider_id": "Rider ID",
+    "vehicle_type": "Vehicle",
+    "total_verification_requests": "Verification Requests",
+    "successful_verification_requests": "Successful Verification",
+    "verification_success_rate": "Verification Score",
+    "gross_orders": "Gross Orders",
+    "completed_orders": "Completed Orders",
+    "completed_orders_in_time": "Completed Orders In-Time",
+    "late_orders": "Late Orders",
+    "failed_orders_by_rider": "Failed Orders",
+    "on_time_delivery_score": "On-Time Delivery Score",
+    "fail_rate_score": "Fail Rate Score",
+    "final_delivery_quality_score": "Final Delivery Quality Score",
+    "segment": "Segment",
+}
+
+# ------------------------------------------------------------
+# DATABASE
+# ------------------------------------------------------------
 
 def get_conn():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 
 
 def init_db():
     conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS riders (
-            rider_id TEXT PRIMARY KEY, name TEXT NOT NULL, phone TEXT, area TEXT,
-            vehicle_type TEXT, active INTEGER DEFAULT 1,
-            created_at TEXT DEFAULT (datetime('now'))
-        );
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS orders (
-            order_id TEXT PRIMARY KEY, rider_id TEXT, rider_name TEXT,
-            order_date TEXT NOT NULL, order_time TEXT, pickup_area TEXT, drop_area TEXT,
-            distance_km REAL DEFAULT 0, order_value REAL DEFAULT 0, currency TEXT DEFAULT 'SAR',
-            status TEXT DEFAULT 'delivered', source TEXT DEFAULT 'manual',
-            created_at TEXT DEFAULT (datetime('now')),
-            FOREIGN KEY (rider_id) REFERENCES riders(rider_id)
-        );
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS sync_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, sync_type TEXT, rows_synced INTEGER,
-            status TEXT, message TEXT, synced_at TEXT DEFAULT (datetime('now'))
-        );
-    """)
-    conn.commit()
-    conn.close()
-
-
-def db_upsert_rider(rider: dict):
-    conn = get_conn()
     conn.execute("""
-        INSERT INTO riders (rider_id, name, phone, area, vehicle_type, active)
-        VALUES (:rider_id, :name, :phone, :area, :vehicle_type, :active)
-        ON CONFLICT(rider_id) DO UPDATE SET
-            name=excluded.name, phone=excluded.phone, area=excluded.area,
-            vehicle_type=excluded.vehicle_type, active=excluded.active
-    """, rider)
+        CREATE TABLE IF NOT EXISTS riders (
+            rider_id TEXT PRIMARY KEY,
+            rider_name TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS performance (
+            rider_id TEXT NOT NULL,
+            month TEXT,
+            city_name TEXT,
+            contract_name TEXT,
+            vehicle_type TEXT,
+            total_verification_requests INTEGER,
+            successful_verification_requests INTEGER,
+            verification_success_rate REAL,
+            gross_orders INTEGER,
+            completed_orders INTEGER,
+            completed_orders_in_time INTEGER,
+            failed_orders_by_rider INTEGER,
+            on_time_delivery_score REAL,
+            fail_rate_score REAL,
+            final_delivery_quality_score REAL,
+            segment TEXT,
+            uploaded_at TEXT NOT NULL,
+            PRIMARY KEY (rider_id, month, contract_name)
+        )
+    """)
     conn.commit()
     conn.close()
 
 
-def db_get_riders() -> pd.DataFrame:
-    conn = get_conn()
-    df = pd.read_sql_query("SELECT * FROM riders ORDER BY name", conn)
-    conn.close()
-    return df
-
-
-def db_delete_rider(rider_id: str):
-    conn = get_conn()
-    conn.execute("DELETE FROM riders WHERE rider_id=?", (rider_id,))
-    conn.commit()
-    conn.close()
-
-
-def db_upsert_orders(rows: list) -> int:
-    if not rows:
+def save_names(df):
+    if df.empty:
         return 0
+
     conn = get_conn()
-    cur = conn.cursor()
-    for r in rows:
-        r.setdefault("currency", "SAR")
-        r.setdefault("status", "delivered")
-        r.setdefault("source", "manual")
-        cur.execute("""
-            INSERT INTO orders (order_id, rider_id, rider_name, order_date, order_time,
-                                 pickup_area, drop_area, distance_km, order_value,
-                                 currency, status, source)
-            VALUES (:order_id, :rider_id, :rider_name, :order_date, :order_time,
-                    :pickup_area, :drop_area, :distance_km, :order_value,
-                    :currency, :status, :source)
-            ON CONFLICT(order_id) DO UPDATE SET
-                rider_id=excluded.rider_id, rider_name=excluded.rider_name,
-                order_date=excluded.order_date, order_time=excluded.order_time,
-                pickup_area=excluded.pickup_area, drop_area=excluded.drop_area,
-                distance_km=excluded.distance_km, order_value=excluded.order_value,
-                currency=excluded.currency, status=excluded.status, source=excluded.source
-        """, r)
+    now = datetime.now().isoformat(timespec="seconds")
+    count = 0
+
+    for _, row in df.iterrows():
+        rider_id = str(row["rider_id"]).strip()
+        rider_name = str(row["rider_name"]).strip()
+
+        if not rider_id or not rider_name or rider_name.lower() == "nan":
+            continue
+
+        conn.execute("""
+            INSERT INTO riders (rider_id, rider_name, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(rider_id) DO UPDATE SET
+                rider_name = excluded.rider_name,
+                updated_at = excluded.updated_at
+        """, (rider_id, rider_name, now))
+        count += 1
+
     conn.commit()
     conn.close()
-    return len(rows)
+    return count
 
 
-def db_get_orders(date_from=None, date_to=None) -> pd.DataFrame:
+def load_names():
     conn = get_conn()
-    q = "SELECT * FROM orders WHERE 1=1"
-    params = []
-    if date_from:
-        q += " AND order_date >= ?"; params.append(str(date_from))
-    if date_to:
-        q += " AND order_date <= ?"; params.append(str(date_to))
-    q += " ORDER BY order_date DESC, order_time DESC"
-    df = pd.read_sql_query(q, conn, params=params)
-    conn.close()
-    return df
-
-
-def db_delete_order(order_id: str):
-    conn = get_conn()
-    conn.execute("DELETE FROM orders WHERE order_id=?", (order_id,))
-    conn.commit()
-    conn.close()
-
-
-def db_log_sync(sync_type: str, rows: int, status: str, message: str = ""):
-    conn = get_conn()
-    conn.execute(
-        "INSERT INTO sync_log (sync_type, rows_synced, status, message) VALUES (?,?,?,?)",
-        (sync_type, rows, status, message)
+    df = pd.read_sql_query(
+        "SELECT rider_id, rider_name FROM riders ORDER BY rider_name",
+        conn
     )
-    conn.commit()
-    conn.close()
-
-
-def db_get_sync_log(limit=20) -> pd.DataFrame:
-    conn = get_conn()
-    df = pd.read_sql_query("SELECT * FROM sync_log ORDER BY synced_at DESC LIMIT ?", conn, params=(limit,))
     conn.close()
     return df
 
 
-# ════════════════════════════════════════════════════════════════════════
-# 2) AUTH — تسجيل الدخول والصلاحيات (بدون مكتبات خارجية إضافية)
-# ════════════════════════════════════════════════════════════════════════
-import yaml
-import bcrypt
+def save_performance(df):
+    conn = get_conn()
+    now = datetime.now().isoformat(timespec="seconds")
 
-USERS_FILE = Path(__file__).parent / "users.yaml"
+    for _, row in df.iterrows():
+        vals = [
+            str(row.get("rider_id", "")).strip(),
+            str(row.get("Month", "")),
+            str(row.get("city_name", "")),
+            str(row.get("contract_name", "")),
+            str(row.get("vehicle_type", "")),
+            to_int(row.get("total_verification_requests")),
+            to_int(row.get("successful_verification_requests")),
+            to_float(row.get("verification_success_rate")),
+            to_int(row.get("gross_orders")),
+            to_int(row.get("completed_orders")),
+            to_int(row.get("completed_orders_in_time")),
+            to_int(row.get("failed_orders_by_rider")),
+            to_float(row.get("on_time_delivery_score")),
+            to_float(row.get("fail_rate_score")),
+            to_float(row.get("final_delivery_quality_score")),
+            str(row.get("segment", "")),
+            now,
+        ]
+
+        conn.execute("""
+            INSERT INTO performance (
+                rider_id, month, city_name, contract_name, vehicle_type,
+                total_verification_requests, successful_verification_requests,
+                verification_success_rate, gross_orders, completed_orders,
+                completed_orders_in_time, failed_orders_by_rider,
+                on_time_delivery_score, fail_rate_score,
+                final_delivery_quality_score, segment, uploaded_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(rider_id, month, contract_name) DO UPDATE SET
+                city_name = excluded.city_name,
+                vehicle_type = excluded.vehicle_type,
+                total_verification_requests = excluded.total_verification_requests,
+                successful_verification_requests = excluded.successful_verification_requests,
+                verification_success_rate = excluded.verification_success_rate,
+                gross_orders = excluded.gross_orders,
+                completed_orders = excluded.completed_orders,
+                completed_orders_in_time = excluded.completed_orders_in_time,
+                failed_orders_by_rider = excluded.failed_orders_by_rider,
+                on_time_delivery_score = excluded.on_time_delivery_score,
+                fail_rate_score = excluded.fail_rate_score,
+                final_delivery_quality_score = excluded.final_delivery_quality_score,
+                segment = excluded.segment,
+                uploaded_at = excluded.uploaded_at
+        """, vals)
+
+    conn.commit()
+    conn.close()
 
 
-def load_users_config():
-    with open(USERS_FILE, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+def get_performance(rider_id):
+    conn = get_conn()
+
+    query = """
+        SELECT
+            p.*,
+            COALESCE(r.rider_name, '') AS rider_name
+        FROM performance p
+        LEFT JOIN riders r ON p.rider_id = r.rider_id
+        WHERE p.rider_id = ?
+        ORDER BY p.uploaded_at DESC
+        LIMIT 1
+    """
+
+    row = pd.read_sql_query(query, conn, params=[str(rider_id).strip()])
+    conn.close()
+
+    if row.empty:
+        return None
+
+    return row.iloc[0].to_dict()
 
 
-def check_password(plain: str, hashed: str) -> bool:
+def get_all_performance():
+    conn = get_conn()
+    df = pd.read_sql_query("""
+        SELECT
+            p.*,
+            COALESCE(r.rider_name, '') AS rider_name
+        FROM performance p
+        LEFT JOIN riders r ON p.rider_id = r.rider_id
+        ORDER BY p.segment, p.rider_id
+    """, conn)
+    conn.close()
+    return df
+
+
+def to_int(value):
     try:
-        return bcrypt.checkpw(plain.encode(), hashed.encode())
+        if pd.isna(value) or value == "":
+            return 0
+        return int(float(value))
     except Exception:
-        return False
+        return 0
 
 
-def login_screen():
-    """شاشة لوجن بسيطة، بترجع (name, username, role). بتوقف الصفحة لحد ما تسجل دخول صح."""
-    if st.session_state.get("auth_ok"):
-        return st.session_state["auth_name"], st.session_state["auth_username"], st.session_state["auth_role"]
+def to_float(value):
+    try:
+        if pd.isna(value) or value == "":
+            return 0.0
+        return float(value)
+    except Exception:
+        return 0.0
+
+
+def pct(value):
+    value = to_float(value)
+    # Source Excel uses 1.0 = 100%
+    if value <= 1.000001:
+        value *= 100
+    return f"{value:.2f}%"
+
+
+def score_class(value):
+    value = to_float(value)
+    if value >= 0.95:
+        return "excellent"
+    if value >= 0.85:
+        return "good"
+    if value >= 0.70:
+        return "warning"
+    return "bad"
+
+
+def segment_class(segment):
+    s = str(segment).strip().upper()
+    return {
+        "A": "seg-a",
+        "B": "seg-b",
+        "C": "seg-c",
+        "D": "seg-d",
+        "E": "seg-e",
+        "F": "seg-f",
+    }.get(s, "seg-other")
+
+
+def validate_performance_file(df):
+    missing = [c for c in PERFORMANCE_COLUMNS if c not in df.columns]
+    return missing
+
+
+# ------------------------------------------------------------
+# ADMIN AUTH
+# ------------------------------------------------------------
+
+def password_hash(value):
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def admin_password():
+    try:
+        return st.secrets["ADMIN_PASSWORD"]
+    except Exception:
+        # Change this before production, or add ADMIN_PASSWORD
+        # to Streamlit Secrets.
+        return "ChangeMe123!"
+
+
+def admin_login():
+    if st.session_state.get("admin_ok"):
+        return True
+
+    st.markdown("## 🔐 Admin")
+    st.caption("Enter the admin password to manage performance data.")
+
+    with st.form("admin_login"):
+        password = st.text_input("Password", type="password")
+        submit = st.form_submit_button("Login", use_container_width=True)
+
+    if submit:
+        if password_hash(password) == password_hash(admin_password()):
+            st.session_state["admin_ok"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+
+    return False
+
+
+# ------------------------------------------------------------
+# UI CSS
+# ------------------------------------------------------------
+
+st.markdown("""
+<style>
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+
+    .block-container {
+        max-width: 1050px;
+        padding-top: 2rem;
+        padding-bottom: 3rem;
+    }
+
+    .brand {
+        text-align:center;
+        margin-bottom: 2rem;
+    }
+
+    .brand-icon {
+        font-size: 46px;
+        line-height: 1;
+        margin-bottom: 8px;
+    }
+
+    .brand-title {
+        font-size: 32px;
+        font-weight: 800;
+        letter-spacing: -0.7px;
+    }
+
+    .brand-subtitle {
+        color:#6b7280;
+        font-size:15px;
+        margin-top:5px;
+    }
+
+    .lookup-card {
+        background: linear-gradient(145deg,#ffffff,#f8fafc);
+        border:1px solid #e5e7eb;
+        border-radius:22px;
+        padding:28px;
+        box-shadow:0 10px 35px rgba(15,23,42,.07);
+        margin-bottom:25px;
+    }
+
+    .profile {
+        background: linear-gradient(145deg,#0f172a,#1e293b);
+        color:white;
+        border-radius:24px;
+        padding:30px;
+        margin-top:25px;
+        box-shadow:0 15px 45px rgba(15,23,42,.18);
+    }
+
+    .profile-name {
+        font-size:30px;
+        font-weight:800;
+    }
+
+    .profile-id {
+        color:#cbd5e1;
+        margin-top:4px;
+        font-size:14px;
+    }
+
+    .segment {
+        display:inline-block;
+        min-width:76px;
+        text-align:center;
+        border-radius:14px;
+        padding:10px 18px;
+        font-size:25px;
+        font-weight:900;
+        margin-top:15px;
+    }
+
+    .seg-a {background:#16a34a;color:#fff;}
+    .seg-b {background:#2563eb;color:#fff;}
+    .seg-c {background:#f59e0b;color:#fff;}
+    .seg-d {background:#f97316;color:#fff;}
+    .seg-e {background:#ef4444;color:#fff;}
+    .seg-f {background:#7f1d1d;color:#fff;}
+    .seg-other {background:#64748b;color:#fff;}
+
+    .metric-card {
+        background:white;
+        border:1px solid #e5e7eb;
+        border-radius:18px;
+        padding:18px;
+        min-height:110px;
+        box-shadow:0 5px 18px rgba(15,23,42,.04);
+    }
+
+    .metric-label {
+        color:#64748b;
+        font-size:13px;
+        font-weight:600;
+        margin-bottom:8px;
+    }
+
+    .metric-value {
+        color:#0f172a;
+        font-size:25px;
+        font-weight:800;
+    }
+
+    .metric-small {
+        color:#64748b;
+        font-size:12px;
+        margin-top:5px;
+    }
+
+    .section-title {
+        font-size:20px;
+        font-weight:800;
+        margin:30px 0 14px;
+    }
+
+    .info-line {
+        background:#f8fafc;
+        border:1px solid #e5e7eb;
+        border-radius:13px;
+        padding:12px 15px;
+        margin-bottom:8px;
+    }
+
+    .admin-box {
+        background:#f8fafc;
+        border:1px solid #e2e8f0;
+        border-radius:18px;
+        padding:22px;
+        margin-bottom:20px;
+    }
+
+    .footer-note {
+        text-align:center;
+        color:#94a3b8;
+        font-size:12px;
+        margin-top:35px;
+    }
+
+    @media (max-width: 700px) {
+        .brand-title {font-size:26px;}
+        .profile {padding:22px;}
+        .profile-name {font-size:24px;}
+    }
+</style>
+""", unsafe_allow_html=True)
+
+init_db()
+
+
+# ------------------------------------------------------------
+# SIDEBAR / ADMIN
+# ------------------------------------------------------------
+
+with st.sidebar:
+    st.markdown("### ⚙️ System")
+    page = st.radio(
+        "Open",
+        ["Rider Performance", "Admin"],
+        label_visibility="collapsed"
+    )
+
+    if st.session_state.get("admin_ok"):
+        if st.button("Logout", use_container_width=True):
+            st.session_state["admin_ok"] = False
+            st.rerun()
+
+
+# ------------------------------------------------------------
+# PUBLIC RIDER PERFORMANCE
+# ------------------------------------------------------------
+
+if page == "Rider Performance":
 
     st.markdown("""
-    <div style="max-width:420px;margin:80px auto 0;text-align:center;">
-        <div style="font-size:40px;">🛵</div>
-        <div style="font-size:22px;font-weight:800;">Rider Tracker</div>
-        <div style="color:#6b7280;font-size:13px;margin-bottom:24px;">تسجيل الدخول للمتابعة</div>
+    <div class="brand">
+        <div class="brand-icon">🏆</div>
+        <div class="brand-title">Rider Performance</div>
+        <div class="brand-subtitle">Check your delivery performance</div>
     </div>
     """, unsafe_allow_html=True)
 
-    config = load_users_config()
-    c1, c2, c3 = st.columns([1, 1.2, 1])
-    with c2:
-        with st.form("login_form"):
-            username = st.text_input("اسم المستخدم")
-            password = st.text_input("كلمة المرور", type="password")
-            submitted = st.form_submit_button("دخول", use_container_width=True)
-
-        if submitted:
-            users = config["credentials"]["usernames"]
-            user = users.get(username)
-            if user and check_password(password, user["password"]):
-                st.session_state["auth_ok"] = True
-                st.session_state["auth_name"] = user["name"]
-                st.session_state["auth_username"] = username
-                st.session_state["auth_role"] = user.get("role", "member")
-                st.rerun()
-            else:
-                st.error("❌ اسم المستخدم أو كلمة المرور غلط")
-
-    st.stop()
-
-
-def require_admin():
-    if st.session_state.get("auth_role") != "admin":
-        st.warning("🔒 الصفحة دي للأدمن بس.")
-        st.stop()
-
-
-def logout_button():
-    if st.sidebar.button("🚪 تسجيل الخروج"):
-        for k in ["auth_ok", "auth_name", "auth_username", "auth_role"]:
-            st.session_state.pop(k, None)
-        st.rerun()
-
-
-# ════════════════════════════════════════════════════════════════════════
-# 3) HUNGER STATION API CLIENT — عدّل هنا بس لما توصلك بيانات الـ API
-# ════════════════════════════════════════════════════════════════════════
-class HungerStationClient:
-    def __init__(self):
-        cfg = st.secrets.get("hunger_station", {}) if hasattr(st, "secrets") else {}
-        self.base_url = cfg.get("base_url", "")
-        self.api_key = cfg.get("api_key", "")
-        self.is_configured = bool(self.base_url and self.api_key)
-
-    def _headers(self):
-        return {"Authorization": f"Bearer {self.api_key}", "Accept": "application/json"}
-
-    def fetch_orders(self, date_from: date, date_to: date) -> list:
-        """
-        لازم ترجع list of dict بنفس شكل جدول orders:
-        order_id, rider_id, rider_name, order_date, order_time,
-        pickup_area, drop_area, distance_km, order_value, currency, status
-
-        لما توصلك الـ docs الحقيقية من هنجر ستيشن، فك التعليق عن الكود تحت
-        وعدّل أسماء الحقول عشان تطابق شكل الـ JSON بتاعهم بالظبط.
-        """
-        if not self.is_configured:
-            raise RuntimeError(
-                "لسه معملتش ربط مع Hunger Station API. ضيف base_url و api_key "
-                "في .streamlit/secrets.toml تحت [hunger_station]"
-            )
-        # import requests
-        # resp = requests.get(f"{self.base_url}/v1/orders", headers=self._headers(),
-        #     params={"date_from": date_from.isoformat(), "date_to": date_to.isoformat()}, timeout=30)
-        # resp.raise_for_status()
-        # raw = resp.json().get("data", [])
-        # mapped = []
-        # for o in raw:
-        #     mapped.append({
-        #         "order_id": str(o["id"]), "rider_id": str(o["courier"]["id"]),
-        #         "rider_name": o["courier"]["name"], "order_date": o["created_at"][:10],
-        #         "order_time": o["created_at"][11:16], "pickup_area": o.get("branch_name", ""),
-        #         "drop_area": o.get("customer_area", ""), "distance_km": float(o.get("distance_km", 0)),
-        #         "order_value": float(o.get("total", 0)), "currency": o.get("currency", "SAR"),
-        #         "status": o.get("status", "delivered"),
-        #     })
-        # return mapped
-        raise NotImplementedError("الشكل الحقيقي للـ API لسه مش معروف — عدّل الدالة دي لما توصلك الـ docs.")
-
-    def fetch_riders(self) -> list:
-        if not self.is_configured:
-            raise RuntimeError("لسه معملتش ربط مع Hunger Station API.")
-        raise NotImplementedError("هتتفعّل لما توصل بيانات الـ API.")
-
-
-# ════════════════════════════════════════════════════════════════════════
-# 3B) LIVE SCRAPER — تسجيل دخول بحسابك على هنجر ستيشن وسحب بياناته "لايف"
-#     (بديل مؤقت لغاية ما يوصلك API رسمي). كل حاجة هنا بتتظبط من الواجهة
-#     نفسها (روابط + مابينج) من غير ما تحتاج تعدّل كود.
-# ════════════════════════════════════════════════════════════════════════
-import requests
-import json as _json
-
-
-class HungerStationScraper:
-    """
-    Session-based scraper بيدخل بحسابك (username/password) على أي صفحة لوجن،
-    وبعدين يجيب بيانات من endpoint معيّن باستخدام نفس الـ session/cookies.
-
-    ملحوظة مهمة: أنا معنديش وصول لموقع هنجر ستيشن، فمش أقدر أحدد الروابط
-    الحقيقية (login_url / data_url) ولا شكل الفورم بالظبط. انت هتجيبهم بنفسك
-    بخطوات بسيطة (موضحة في تبويب "لايف من هنجر ستيشن" داخل السيستم):
-      1) افتح صفحة تسجيل الدخول بتاعة هنجر ستيشن في المتصفح.
-      2) دوس F12 (أو Cmd+Option+I على ماك) → افتح تبويب Network.
-      3) سجّل الدخول بحسابك العادي وراقب الطلبات اللي بتظهر.
-      4) دور على الطلب اللي بيتبعت لما تدوس "تسجيل الدخول" (عادة POST) —
-         ده الـ login_url، وشوف اسم حقول اليوزر والباسورد فيه (username_field/password_field).
-      5) بعد الدخول، دور في الصفحة اللي فيها المناديب/الطلبات على الطلب اللي
-         بيرجع البيانات (عادة XHR/Fetch وبيرجع JSON) — ده الـ data_url.
-      6) انسخ الروابط دي وحطها في السيستم من تبويب "الاتصال".
-    """
-
-    def __init__(self, login_url: str, username_field: str, password_field: str,
-                 username: str, password: str, extra_login_fields: dict = None):
-        self.login_url = login_url
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        })
-        self.username_field = username_field
-        self.password_field = password_field
-        self.username = username
-        self.password = password
-        self.extra_login_fields = extra_login_fields or {}
-        self.logged_in = False
-
-    def login(self) -> tuple:
-        """يرجع (success: bool, message: str)."""
-        try:
-            payload = {
-                self.username_field: self.username,
-                self.password_field: self.password,
-                **self.extra_login_fields,
-            }
-            resp = self.session.post(self.login_url, data=payload, timeout=20, allow_redirects=True)
-            if resp.status_code >= 400:
-                return False, f"فشل تسجيل الدخول — كود الاستجابة: {resp.status_code}"
-            self.logged_in = True
-            return True, "تم تسجيل الدخول بنجاح"
-        except Exception as e:
-            return False, f"خطأ أثناء الاتصال: {e}"
-
-    def login_via_bearer_or_cookie(self, token_or_cookie: str, header_name: str = "Authorization",
-                                    is_cookie: bool = False):
-        """
-        لو هنجر بتستخدم توكن جاهز (نسخته من الـ DevTools بعد ما دخلت يدوي) بدل
-        فورم لوجن كامل — استخدم الدالة دي بدل login() العادية.
-        """
-        if is_cookie:
-            self.session.headers.update({"Cookie": token_or_cookie})
-        else:
-            self.session.headers.update({header_name: token_or_cookie})
-        self.logged_in = True
-
-    def fetch_raw(self, data_url: str, method: str = "GET", params: dict = None, body: dict = None) -> dict:
-        if not self.logged_in:
-            raise RuntimeError("لازم تسجل دخول الأول (login) قبل ما تجيب البيانات.")
-        if method.upper() == "GET":
-            resp = self.session.get(data_url, params=params, timeout=20)
-        else:
-            resp = self.session.post(data_url, json=body, params=params, timeout=20)
-        resp.raise_for_status()
-        return resp.json()
-
-
-def get_by_path(obj, path: str):
-    """
-    استخراج قيمة من JSON متداخل باستخدام مسار بنقط، زي: 'courier.name' أو 'data.orders'.
-    بيرجع None لو المسار مش موجود، بدل ما يعمل كراش.
-    """
-    if not path:
-        return None
-    cur = obj
-    for part in path.split("."):
-        if isinstance(cur, dict):
-            cur = cur.get(part)
-        elif isinstance(cur, list) and part.isdigit():
-            idx = int(part)
-            cur = cur[idx] if idx < len(cur) else None
-        else:
-            return None
-    return cur
-
-
-def apply_mapping(raw_json: dict, list_path: str, field_map: dict) -> list:
-    """
-    list_path: المسار لمكان الليستة جوه الـ JSON (مثال: 'data.orders'، سيبه فاضي
-               لو الـ JSON نفسه عبارة عن ليستة).
-    field_map: dict فيه المفتاح عندنا (order_id, rider_name, ...) وقيمته هي اسم
-               الحقل المقابل جوه كل عنصر في هنجر (يقبل نقط للحقول المتداخلة زي 'courier.name').
-    """
-    items = get_by_path(raw_json, list_path) if list_path else raw_json
-    if not isinstance(items, list):
-        return []
-    rows = []
-    for it in items:
-        row = {}
-        for our_key, their_key in field_map.items():
-            if their_key:
-                row[our_key] = get_by_path(it, their_key)
-        rows.append(row)
-    return rows
-
-
-# ════════════════════════════════════════════════════════════════════════
-# 4) GOOGLE SHEETS SYNC — تغذية Looker Studio
-# ════════════════════════════════════════════════════════════════════════
-def sheets_is_configured() -> bool:
-    try:
-        return "gcp_service_account" in st.secrets and bool(st.secrets["gcp_service_account"].get("spreadsheet_id"))
-    except Exception:
-        return False
-
-
-def sheets_get_url() -> str:
-    try:
-        sid = st.secrets["gcp_service_account"]["spreadsheet_id"]
-        return f"https://docs.google.com/spreadsheets/d/{sid}"
-    except Exception:
-        return ""
-
-
-def _sheets_write_df(sh, tab_name: str, df: pd.DataFrame):
-    try:
-        ws = sh.worksheet(tab_name)
-        ws.clear()
-    except Exception:
-        ws = sh.add_worksheet(title=tab_name, rows=max(len(df) + 10, 100), cols=max(len(df.columns) + 2, 10))
-    if df.empty:
-        ws.update([["لا توجد بيانات"]])
-        return
-    values = [df.columns.tolist()] + df.astype(str).values.tolist()
-    ws.update(values)
-
-
-def sheets_sync_all(orders_df: pd.DataFrame, riders_summary_df: pd.DataFrame, daily_summary_df: pd.DataFrame) -> int:
-    import gspread
-    from google.oauth2.service_account import Credentials
-
-    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-    creds_dict = dict(st.secrets["gcp_service_account"])
-    spreadsheet_id = creds_dict.pop("spreadsheet_id", None)
-    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-    client = gspread.authorize(creds)
-    sh = client.open_by_key(spreadsheet_id)
-
-    _sheets_write_df(sh, "Orders", orders_df)
-    _sheets_write_df(sh, "Riders_Summary", riders_summary_df)
-    _sheets_write_df(sh, "Daily_Summary", daily_summary_df)
-    return len(orders_df)
-
-
-# ════════════════════════════════════════════════════════════════════════
-# 5) ANALYSIS — كل حسابات الأداء والتحليل
-# ════════════════════════════════════════════════════════════════════════
-def riders_summary(orders: pd.DataFrame) -> pd.DataFrame:
-    if orders.empty:
-        return pd.DataFrame(columns=["rider_id", "rider_name", "total_orders", "delivered",
-                                      "cancelled", "total_km", "avg_km_per_order",
-                                      "total_value", "acceptance_rate"])
-    g = orders.groupby(["rider_id", "rider_name"], dropna=False)
-    out = g.agg(
-        total_orders=("order_id", "count"),
-        delivered=("status", lambda s: (s == "delivered").sum()),
-        cancelled=("status", lambda s: (s == "cancelled").sum()),
-        rejected=("status", lambda s: (s == "rejected").sum()),
-        total_km=("distance_km", "sum"),
-        total_value=("order_value", "sum"),
-    ).reset_index()
-    out["avg_km_per_order"] = (out["total_km"] / out["total_orders"]).round(2)
-    out["acceptance_rate"] = ((out["delivered"] / out["total_orders"]) * 100).round(1)
-    return out.sort_values("total_orders", ascending=False)
-
-
-def daily_summary(orders: pd.DataFrame) -> pd.DataFrame:
-    if orders.empty:
-        return pd.DataFrame(columns=["order_date", "total_orders", "total_km", "total_value", "active_riders"])
-    g = orders.groupby("order_date")
-    out = g.agg(
-        total_orders=("order_id", "count"), total_km=("distance_km", "sum"),
-        total_value=("order_value", "sum"), active_riders=("rider_id", "nunique"),
-    ).reset_index()
-    return out.sort_values("order_date", ascending=False)
-
-
-def hourly_distribution(orders: pd.DataFrame) -> pd.DataFrame:
-    if orders.empty or "order_time" not in orders.columns:
-        return pd.DataFrame(columns=["hour", "total_orders"])
-    tmp = orders.copy()
-    tmp["hour"] = tmp["order_time"].astype(str).str.slice(0, 2)
-    out = tmp.groupby("hour").agg(total_orders=("order_id", "count")).reset_index()
-    return out.sort_values("hour")
-
-
-def compute_kpis(orders: pd.DataFrame) -> dict:
-    if orders.empty:
-        return dict(total_orders=0, total_km=0, total_value=0, active_riders=0, avg_km=0, cancellation_rate=0)
-    total = len(orders)
-    cancelled = (orders["status"] == "cancelled").sum()
-    return dict(
-        total_orders=total, total_km=round(orders["distance_km"].sum(), 1),
-        total_value=round(orders["order_value"].sum(), 1), active_riders=orders["rider_id"].nunique(),
-        avg_km=round(orders["distance_km"].mean(), 2) if total else 0,
-        cancellation_rate=round((cancelled / total) * 100, 1) if total else 0,
-    )
-
-
-def auto_insights(orders: pd.DataFrame, r_summary: pd.DataFrame, d_summary: pd.DataFrame) -> list:
-    insights = []
-    if orders.empty:
-        return ["لا توجد بيانات كافية لعمل تحليل بعد."]
-    k = compute_kpis(orders)
-    insights.append(f"إجمالي الطلبات في الفترة المحددة: {k['total_orders']} طلب، بإجمالي {k['total_km']} كم.")
-    insights.append(f"نسبة الإلغاء: {k['cancellation_rate']}% — "
-                     f"{'مرتفعة، يُنصح بمراجعة أسباب الإلغاء' if k['cancellation_rate'] > 15 else 'ضمن المعدل الطبيعي'}.")
-    if not r_summary.empty:
-        top = r_summary.iloc[0]
-        insights.append(f"أعلى مندوب في عدد الطلبات: {top['rider_name']} بـ {int(top['total_orders'])} طلب.")
-        low_acc = r_summary[r_summary["acceptance_rate"] < 70]
-        if not low_acc.empty:
-            names = "، ".join(low_acc["rider_name"].head(5).tolist())
-            insights.append(f"مناديب بنسبة قبول أقل من 70%: {names}.")
-    if not d_summary.empty:
-        busiest = d_summary.sort_values("total_orders", ascending=False).iloc[0]
-        insights.append(f"أكثر يوم ازدحاماً: {busiest['order_date']} بـ {int(busiest['total_orders'])} طلب.")
-    return insights
-
-
-# ════════════════════════════════════════════════════════════════════════
-# 6) EXCEL EXPORT — تصدير كل التقارير في ملف واحد منسّق
-# ════════════════════════════════════════════════════════════════════════
-HEADER_FILL = PatternFill("solid", start_color="4F46E5")
-HEADER_FONT = Font(name="Arial", bold=True, color="FFFFFF", size=11)
-CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
-THIN = Side(style="thin", color="D1D5DB")
-BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
-ZEBRA = PatternFill("solid", start_color="F9FAFB")
-
-
-def _xl_write_table(ws, df: pd.DataFrame, start_row=1, title=None):
-    r = start_row
-    if title:
-        ws.cell(row=r, column=1, value=title).font = Font(bold=True, size=13, color="1F2937")
-        r += 2
-    if df.empty:
-        ws.cell(row=r, column=1, value="لا توجد بيانات")
-        return r + 1
-    for ci, col in enumerate(df.columns, 1):
-        cell = ws.cell(row=r, column=ci, value=str(col))
-        cell.font = HEADER_FONT; cell.fill = HEADER_FILL; cell.alignment = CENTER; cell.border = BORDER
-        ws.column_dimensions[get_column_letter(ci)].width = max(14, len(str(col)) + 4)
-    ws.row_dimensions[r].height = 22
-    for ri, (_, row) in enumerate(df.iterrows(), r + 1):
-        for ci, val in enumerate(row, 1):
-            cell = ws.cell(row=ri, column=ci, value=val)
-            cell.border = BORDER; cell.alignment = CENTER
-            if ri % 2 == 0:
-                cell.fill = ZEBRA
-    return r + len(df) + 2
-
-
-def build_full_report(orders: pd.DataFrame, date_from=None, date_to=None) -> bytes:
-    r_sum = riders_summary(orders)
-    d_sum = daily_summary(orders)
-    k = compute_kpis(orders)
-    insights = auto_insights(orders, r_sum, d_sum)
-
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "ملخص عام"; ws.sheet_view.rightToLeft = True
-    period = f"{date_from} → {date_to}" if date_from and date_to else "كل البيانات"
-    ws.cell(row=1, column=1, value=f"تقرير أداء المناديب — الفترة: {period}").font = Font(bold=True, size=15)
-    ws.cell(row=2, column=1, value=f"تاريخ إنشاء التقرير: {datetime.now().strftime('%Y-%m-%d %H:%M')}").font = Font(italic=True, size=10, color="6B7280")
-    kpi_df = pd.DataFrame([
-        ("إجمالي الطلبات", k["total_orders"]), ("إجمالي الكيلومترات", k["total_km"]),
-        ("إجمالي القيمة", k["total_value"]), ("عدد المناديب النشطين", k["active_riders"]),
-        ("متوسط الكم لكل طلب", k["avg_km"]), ("نسبة الإلغاء %", k["cancellation_rate"]),
-    ], columns=["المؤشر", "القيمة"])
-    _xl_write_table(ws, kpi_df, start_row=4, title="المؤشرات الرئيسية")
-
-    ws2 = wb.create_sheet("أداء المناديب"); ws2.sheet_view.rightToLeft = True
-    r_sum_ar = r_sum.rename(columns={
-        "rider_id": "رقم المندوب", "rider_name": "الاسم", "total_orders": "إجمالي الطلبات",
-        "delivered": "تم التسليم", "cancelled": "ملغي", "rejected": "مرفوض",
-        "total_km": "إجمالي الكم", "total_value": "إجمالي القيمة",
-        "avg_km_per_order": "متوسط كم/طلب", "acceptance_rate": "نسبة القبول %"
-    })
-    _xl_write_table(ws2, r_sum_ar, title="أداء كل مندوب")
-
-    ws3 = wb.create_sheet("ملخص يومي"); ws3.sheet_view.rightToLeft = True
-    d_sum_ar = d_sum.rename(columns={
-        "order_date": "التاريخ", "total_orders": "إجمالي الطلبات",
-        "total_km": "إجمالي الكم", "total_value": "إجمالي القيمة", "active_riders": "عدد المناديب"
-    })
-    _xl_write_table(ws3, d_sum_ar, title="ملخص كل يوم")
-
-    ws4 = wb.create_sheet("تفاصيل الطلبات"); ws4.sheet_view.rightToLeft = True
-    orders_ar = orders.rename(columns={
-        "order_id": "رقم الطلب", "rider_id": "رقم المندوب", "rider_name": "اسم المندوب",
-        "order_date": "التاريخ", "order_time": "الوقت", "pickup_area": "منطقة الاستلام",
-        "drop_area": "منطقة التسليم", "distance_km": "الكيلومترات", "order_value": "القيمة",
-        "currency": "العملة", "status": "الحالة", "source": "المصدر"
-    }) if not orders.empty else orders
-    _xl_write_table(ws4, orders_ar, title="كل الطلبات (بعد الفلاتر)")
-
-    ws5 = wb.create_sheet("تحليل تلقائي"); ws5.sheet_view.rightToLeft = True
-    ws5.cell(row=1, column=1, value="ملاحظات وتحليل تلقائي").font = Font(bold=True, size=14)
-    for i, line in enumerate(insights, 3):
-        c = ws5.cell(row=i, column=1, value=f"•  {line}")
-        c.alignment = Alignment(horizontal="right", wrap_text=True)
-        ws5.row_dimensions[i].height = 22
-    ws5.column_dimensions["A"].width = 100
-
-    buf = BytesIO()
-    wb.save(buf)
-    return buf.getvalue()
-
-
-# ════════════════════════════════════════════════════════════════════════
-# 7) STREAMLIT UI
-# ════════════════════════════════════════════════════════════════════════
-name, username, role = login_screen()
-logout_button()
-init_db()
-
-st.sidebar.markdown(f"👋 أهلاً **{name}** ({'أدمن' if role == 'admin' else 'عضو فريق'})")
-
-st.sidebar.markdown("### 🔎 الفلاتر")
-default_from = date.today() - timedelta(days=30)
-date_from = st.sidebar.date_input("من تاريخ", value=default_from)
-date_to = st.sidebar.date_input("إلى تاريخ", value=date.today())
-
-all_orders = db_get_orders(date_from=date_from, date_to=date_to)
-all_riders_df = db_get_riders()
-
-rider_filter = st.sidebar.multiselect(
-    "فلترة بالمندوب",
-    options=sorted(all_orders["rider_name"].dropna().unique().tolist()) if not all_orders.empty else []
-)
-if rider_filter:
-    all_orders = all_orders[all_orders["rider_name"].isin(rider_filter)]
-
-status_filter = st.sidebar.multiselect("فلترة بالحالة", options=["delivered", "cancelled", "rejected"], default=[])
-if status_filter:
-    all_orders = all_orders[all_orders["status"].isin(status_filter)]
-
-st.title("🛵 نظام تراكنج المناديب")
-
-tabs = st.tabs(["📊 الداشبورد", "🔴 لايف من هنجر ستيشن", "➕ إدخال / استيراد",
-                "🏍️ المناديب", "📤 التصدير والمزامنة", "⚙️ الإعدادات"])
-
-# ── TAB 1: Dashboard ──────────────────────────────────────────────────────
-with tabs[0]:
-    if all_orders.empty:
-        st.info("مفيش بيانات في الفترة/الفلاتر دي لسه. روح تبويب 'إدخال / استيراد' وضيف بيانات.")
-    else:
-        k = compute_kpis(all_orders)
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("إجمالي الطلبات", k["total_orders"])
-        c2.metric("إجمالي الكيلومترات", k["total_km"])
-        c3.metric("إجمالي القيمة", f"{k['total_value']:,.0f}")
-        c4.metric("عدد المناديب النشطين", k["active_riders"])
-        c5.metric("نسبة الإلغاء", f"{k['cancellation_rate']}%")
-
-        r_sum = riders_summary(all_orders)
-        d_sum = daily_summary(all_orders)
-        h_dist = hourly_distribution(all_orders)
-
-        cc1, cc2 = st.columns(2)
-        with cc1:
-            st.subheader("📈 الطلبات يومياً")
-            st.plotly_chart(px.bar(d_sum.sort_values("order_date"), x="order_date", y="total_orders"), use_container_width=True)
-        with cc2:
-            st.subheader("🕐 توزيع الطلبات على الساعات")
-            st.plotly_chart(px.bar(h_dist, x="hour", y="total_orders"), use_container_width=True)
-
-        st.subheader("🏆 أداء المناديب")
-        st.dataframe(r_sum, use_container_width=True, height=350)
-
-        st.subheader("🧠 تحليل تلقائي")
-        for line in auto_insights(all_orders, r_sum, d_sum):
-            st.markdown(f"- {line}")
-
-# ── TAB "لايف من هنجر ستيشن": سكرابينج بحسابك + عرض لايف بتنسيق مختلف ──────
-with tabs[1]:
-    st.markdown("### 🔴 سحب البيانات لايف من حسابك على هنجر ستيشن")
-    st.caption(
-        "بديل مؤقت لغاية ما يوصلك API رسمي: بتسجل دخول بحسابك، والسيستم يسحب "
-        "البيانات ويعرضها هنا بشكل لايف وتنسيق مختلف عن تبويب الداشبورد."
-    )
-
-    live_sub1, live_sub2, live_sub3 = st.tabs(["1️⃣ الاتصال", "2️⃣ ربط الحقول (Mapping)", "3️⃣ اللايف تراكنج"])
-
-    # -- تهيئة session_state --
-    for k, v in [("hs_login_url", ""), ("hs_data_url", ""), ("hs_username_field", "username"),
-                 ("hs_password_field", "password"), ("hs_username", ""), ("hs_password", ""),
-                 ("hs_list_path", ""), ("hs_field_map", {}), ("hs_sample_json", ""),
-                 ("hs_scraper", None), ("hs_last_raw", None)]:
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-    # ── 1) الاتصال ──────────────────────────────────────────────────────
-    with live_sub1:
-        with st.expander("📖 إزاي تجيب الروابط دي؟ (خطوة بخطوة)", expanded=False):
-            st.markdown("""
-1. افتح صفحة تسجيل الدخول بتاعة هنجر ستيشن على المتصفح (كروم مثلاً).
-2. دوس **F12** لفتح أدوات المطوّر، وروح لتبويب **Network**.
-3. سجّل دخول بحسابك العادي زي ما بتعمل دايماً.
-4. هتلاقي طلب باسم شبه login أو auth أو signin — دوس عليه وشوف:
-   - الرابط (Request URL) → ده الـ **login_url**
-   - في تبويب Payload/Form Data هتلاقي أسماء الحقول (زي email أو username) → دول الـ **username_field / password_field**
-5. بعد الدخول، روح لصفحة تتابع فيها المناديب/الطلبات، ودوّر في Network على طلب
-   من نوع **Fetch/XHR** بيرجع بيانات (مش صورة ولا CSS) → ده الـ **data_url**.
-6. لو الموقع بيستخدم Token/Bearer بدل يوزر وباسورد عادي (هتلاقيه في تبويب Headers
-   باسم Authorization)، استخدم خيار "عندي Token/Cookie جاهز" تحت بدل تسجيل الدخول العادي.
-
-⚠️ لو الموقع فيه CAPTCHA أو رمز تحقق (OTP/2FA)، الطريقة دي مش هتشتغل من غير تدخل يدوي.
-            """)
-
-        conn_mode = st.radio("طريقة الدخول", ["يوزر وباسورد عادي", "عندي Token/Cookie جاهز"], horizontal=True)
-
-        if conn_mode == "يوزر وباسورد عادي":
-            c1, c2 = st.columns(2)
-            st.session_state["hs_login_url"] = c1.text_input("Login URL", value=st.session_state["hs_login_url"])
-            st.session_state["hs_data_url"] = c2.text_input("Data URL (رابط البيانات بعد الدخول)", value=st.session_state["hs_data_url"])
-            c3, c4 = st.columns(2)
-            st.session_state["hs_username_field"] = c3.text_input("اسم حقل اليوزر في الفورم", value=st.session_state["hs_username_field"])
-            st.session_state["hs_password_field"] = c4.text_input("اسم حقل الباسورد في الفورم", value=st.session_state["hs_password_field"])
-            c5, c6 = st.columns(2)
-            st.session_state["hs_username"] = c5.text_input("اليوزر/الإيميل بتاعك في هنجر ستيشن")
-            st.session_state["hs_password"] = c6.text_input("الباسورد بتاعك في هنجر ستيشن", type="password")
-
-            st.caption("🔒 الباسورد بيتخزن في الذاكرة المؤقتة بس (session) ومش بيتحفظ في قاعدة البيانات ولا أي ملف.")
-
-            if st.button("🔌 اتصل وسجّل دخول"):
-                scraper = HungerStationScraper(
-                    login_url=st.session_state["hs_login_url"],
-                    username_field=st.session_state["hs_username_field"],
-                    password_field=st.session_state["hs_password_field"],
-                    username=st.session_state["hs_username"],
-                    password=st.session_state["hs_password"],
-                )
-                ok, msg = scraper.login()
-                if ok:
-                    st.session_state["hs_scraper"] = scraper
-                    st.success(f"✅ {msg}")
-                else:
-                    st.error(f"❌ {msg}")
-        else:
-            c1, c2 = st.columns(2)
-            st.session_state["hs_data_url"] = c1.text_input("Data URL", value=st.session_state["hs_data_url"])
-            token_val = c2.text_input("Token أو Cookie كامل (زي ما ظهر في DevTools)", type="password")
-            is_cookie = st.checkbox("ده Cookie مش Bearer Token")
-            if st.button("🔌 استخدم الـ Token/Cookie ده"):
-                scraper = HungerStationScraper(login_url="", username_field="", password_field="",
-                                                username="", password="")
-                scraper.login_via_bearer_or_cookie(token_val, is_cookie=is_cookie)
-                st.session_state["hs_scraper"] = scraper
-                st.success("✅ تم الحفظ — جرّب تجيب عينة بيانات في التبويب الجاي")
-
-    # ── 2) Mapping ──────────────────────────────────────────────────────
-    with live_sub2:
-        scraper = st.session_state.get("hs_scraper")
-        if not scraper or not scraper.logged_in:
-            st.info("سجّل الدخول الأول من تبويب 'الاتصال'.")
-        else:
-            if st.button("📡 اجلب عينة بيانات الآن (Test Fetch)"):
-                try:
-                    raw = scraper.fetch_raw(st.session_state["hs_data_url"])
-                    st.session_state["hs_last_raw"] = raw
-                    st.success("✅ اتجابت البيانات، شوفها تحت وابني المابينج عليها")
-                except Exception as e:
-                    st.error(f"❌ فشل الجلب: {e}")
-
-            if st.session_state.get("hs_last_raw") is not None:
-                with st.expander("👁️ شكل الـ JSON الراجع (عشان تبني المابينج عليه)", expanded=True):
-                    st.json(st.session_state["hs_last_raw"], expanded=False)
-
-                st.session_state["hs_list_path"] = st.text_input(
-                    "مسار الليستة جوه الـ JSON (سيبه فاضي لو الـ JSON نفسه ليستة)",
-                    value=st.session_state["hs_list_path"],
-                    placeholder="مثال: data.orders"
-                )
-
-                st.markdown("**اربط كل حقل عندنا بالحقل المقابل في هنجر ستيشن:**")
-                target_fields = ["order_id", "rider_id", "rider_name", "order_date", "order_time",
-                                  "pickup_area", "drop_area", "distance_km", "order_value", "status"]
-                fmap = st.session_state["hs_field_map"]
-                cols = st.columns(2)
-                for i, tf in enumerate(target_fields):
-                    fmap[tf] = cols[i % 2].text_input(f"حقلنا: {tf}", value=fmap.get(tf, ""), key=f"map_{tf}",
-                                                       placeholder="مثال: courier.name")
-                st.session_state["hs_field_map"] = fmap
-
-                if st.button("✅ اختبر المابينج على العينة"):
-                    rows = apply_mapping(st.session_state["hs_last_raw"], st.session_state["hs_list_path"], fmap)
-                    if rows:
-                        st.success(f"✅ اتحول {len(rows)} صف بنجاح — شوف النتيجة تحت")
-                        st.dataframe(pd.DataFrame(rows), use_container_width=True)
-                    else:
-                        st.warning("مفيش صفوف طلعت — راجع list_path والمابينج.")
-
-    # ── 3) Live tracking view ───────────────────────────────────────────
-    with live_sub3:
-        scraper = st.session_state.get("hs_scraper")
-        if not scraper or not scraper.logged_in or not st.session_state["hs_field_map"]:
-            st.info("لازم تخلّص خطوة 'الاتصال' و'ربط الحقول' الأول.")
-        else:
-            auto = st.checkbox("🔄 تحديث تلقائي كل 30 ثانية", value=False)
-            if auto and AUTOREFRESH_AVAILABLE:
-                st_autorefresh(interval=30_000, key="hs_live_refresh")
-            elif auto and not AUTOREFRESH_AVAILABLE:
-                st.caption("⚠️ لتفعيل التحديث التلقائي ضيف `streamlit-autorefresh` في requirements.txt")
-
-            colA, colB = st.columns([1, 3])
-            with colA:
-                manual_refresh = st.button("🔄 تحديث الآن")
-            with colB:
-                st.caption(f"آخر تحديث: {datetime.now().strftime('%H:%M:%S')}")
-
-            if manual_refresh or auto:
-                try:
-                    raw = scraper.fetch_raw(st.session_state["hs_data_url"])
-                    rows = apply_mapping(raw, st.session_state["hs_list_path"], st.session_state["hs_field_map"])
-                    # تنضيف بسيط قبل الحفظ
-                    clean_rows = []
-                    for r in rows:
-                        if not r.get("order_id"):
-                            continue
-                        r["distance_km"] = float(r.get("distance_km") or 0)
-                        r["order_value"] = float(r.get("order_value") or 0)
-                        r.setdefault("order_date", date.today().isoformat())
-                        r.setdefault("status", "delivered")
-                        r["source"] = "hunger_station_live"
-                        clean_rows.append(r)
-                    if clean_rows:
-                        db_upsert_orders(clean_rows)
-                        db_log_sync("hunger_station_live", len(clean_rows), "success")
-                    st.session_state["hs_live_rows"] = clean_rows
-                except Exception as e:
-                    st.error(f"❌ فشل التحديث: {e}")
-                    db_log_sync("hunger_station_live", 0, "error", str(e))
-
-            live_rows = st.session_state.get("hs_live_rows", [])
-            st.markdown(f"#### 🟢 لايف — {len(live_rows)} طلب في آخر سحب")
-
-            # تنسيق مختلف تماماً عن تبويب الداشبورد: فييد لايف بكروت متحركة
-            for r in live_rows[:30]:
-                st.markdown(f"""
-                <div style="display:flex;align-items:center;justify-content:space-between;
-                    background:linear-gradient(90deg,#0f172a,#111827);border:1px solid #1e293b;
-                    border-radius:12px;padding:12px 18px;margin-bottom:8px;">
-                  <div style="display:flex;align-items:center;gap:10px;">
-                    <span style="width:8px;height:8px;border-radius:50%;background:#22c55e;
-                        display:inline-block;animation:pulse 1.5s infinite;"></span>
-                    <div>
-                      <div style="color:#fff;font-weight:700;">{r.get('rider_name','—')}</div>
-                      <div style="color:#94a3b8;font-size:12px;">طلب #{r.get('order_id','—')} · {r.get('order_time','—')}</div>
-                    </div>
-                  </div>
-                  <div style="display:flex;gap:20px;">
-                    <div style="text-align:center;"><div style="color:#64748b;font-size:10px;">كم</div>
-                        <div style="color:#60a5fa;font-weight:700;">{r.get('distance_km','—')}</div></div>
-                    <div style="text-align:center;"><div style="color:#64748b;font-size:10px;">القيمة</div>
-                        <div style="color:#4ade80;font-weight:700;">{r.get('order_value','—')}</div></div>
-                  </div>
-                </div>
-                <style>@keyframes pulse {{0%{{opacity:1}}50%{{opacity:.3}}100%{{opacity:1}}}}</style>
-                """, unsafe_allow_html=True)
-
-# ── TAB 2: Data entry / import ───────────────────────────────────────────
-with tabs[2]:
-    st.markdown("### طريقة إضافة البيانات دلوقتي")
-    st.caption("لغاية ما يوصلك API هنجر ستيشن، تقدر تضيف الطلبات يدوي أو تستورد ملف Excel/CSV دفعة واحدة.")
-
-    sub1, sub2, sub3 = st.tabs(["✍️ إدخال يدوي", "📁 استيراد ملف", "🔌 مزامنة من Hunger Station API"])
-
-    with sub1:
-        with st.form("manual_order_form", clear_on_submit=True):
-            oc1, oc2, oc3 = st.columns(3)
-            order_id = oc1.text_input("رقم الطلب *")
-            r_name = oc2.text_input("اسم المندوب *")
-            r_id = oc3.text_input("رقم المندوب *")
-            oc4, oc5, oc6 = st.columns(3)
-            o_date = oc4.date_input("التاريخ", value=date.today())
-            o_time = oc5.time_input("الوقت")
-            km = oc6.number_input("الكيلومترات", min_value=0.0, step=0.1)
-            oc7, oc8, oc9 = st.columns(3)
-            value = oc7.number_input("قيمة الطلب", min_value=0.0, step=1.0)
-            status = oc8.selectbox("الحالة", ["delivered", "cancelled", "rejected"])
-            pickup = oc9.text_input("منطقة الاستلام")
-            if st.form_submit_button("✅ إضافة الطلب"):
-                if not order_id or not r_name or not r_id:
-                    st.error("رقم الطلب واسم ورقم المندوب حقول إجبارية.")
-                else:
-                    db_upsert_orders([{
-                        "order_id": order_id, "rider_id": r_id, "rider_name": r_name,
-                        "order_date": o_date.isoformat(), "order_time": o_time.strftime("%H:%M"),
-                        "pickup_area": pickup, "drop_area": "", "distance_km": km,
-                        "order_value": value, "status": status, "source": "manual",
-                    }])
-                    st.success(f"✅ تم إضافة الطلب {order_id}")
-                    st.rerun()
-
-    with sub2:
-        st.caption("الملف لازم يحتوي أعمدة: order_id, rider_id, rider_name, order_date, order_time, "
-                    "pickup_area, drop_area, distance_km, order_value, status")
-        up = st.file_uploader("ارفع ملف Excel أو CSV", type=["xlsx", "csv"])
-        if up:
-            try:
-                df = pd.read_csv(up) if up.name.endswith(".csv") else pd.read_excel(up)
-                st.dataframe(df.head(20), use_container_width=True)
-                if st.button("📥 استيراد كل الصفوف دي"):
-                    required = ["order_id", "rider_id", "rider_name", "order_date"]
-                    missing = [c for c in required if c not in df.columns]
-                    if missing:
-                        st.error(f"ناقص الأعمدة دي: {missing}")
-                    else:
-                        rows = df.fillna("").astype(str).to_dict("records")
-                        for r in rows:
-                            r["distance_km"] = float(r.get("distance_km") or 0)
-                            r["order_value"] = float(r.get("order_value") or 0)
-                        n = db_upsert_orders(rows)
-                        st.success(f"✅ تم استيراد {n} صف بنجاح")
-                        st.rerun()
-            except Exception as e:
-                st.error(f"مشكلة في قراءة الملف: {e}")
-
-    with sub3:
-        client = HungerStationClient()
-        if not client.is_configured:
-            st.warning(
-                "🔌 لسه معملتش ربط الـ API. لما توصلك بيانات الدخول من هنجر ستيشن، ضيفهم في "
-                "`.streamlit/secrets.toml` تحت `[hunger_station]` — ودالة `fetch_orders` فوق في "
-                "الملف ده هتشتغل تلقائياً من غير ما تغيّر حاجة تانية."
-            )
-        else:
-            c1, c2 = st.columns(2)
-            f_from = c1.date_input("من", value=date.today(), key="api_from")
-            f_to = c2.date_input("إلى", value=date.today(), key="api_to")
-            if st.button("🔄 اسحب الطلبات من هنجر ستيشن الآن"):
-                try:
-                    rows = client.fetch_orders(f_from, f_to)
-                    n = db_upsert_orders(rows)
-                    db_log_sync("hunger_station_api", n, "success")
-                    st.success(f"✅ اتسحب {n} طلب من الـ API")
-                    st.rerun()
-                except Exception as e:
-                    db_log_sync("hunger_station_api", 0, "error", str(e))
-                    st.error(f"❌ فشلت المزامنة: {e}")
-
-# ── TAB 3: Riders management ──────────────────────────────────────────────
-with tabs[3]:
-    st.subheader("🏍️ إدارة المناديب")
-    st.dataframe(all_riders_df, use_container_width=True)
-
-    if role == "admin":
-        with st.expander("➕ إضافة / تعديل مندوب"):
-            with st.form("rider_form", clear_on_submit=True):
-                rc1, rc2, rc3 = st.columns(3)
-                rid = rc1.text_input("رقم المندوب *")
-                rname = rc2.text_input("الاسم *")
-                rphone = rc3.text_input("الموبايل")
-                rc4, rc5, rc6 = st.columns(3)
-                rarea = rc4.text_input("المنطقة")
-                rvehicle = rc5.selectbox("نوع المركبة", ["دراجة نارية", "دراجة هوائية", "سيارة"])
-                ractive = rc6.selectbox("الحالة", ["نشط", "غير نشط"])
-                if st.form_submit_button("💾 حفظ"):
-                    if not rid or not rname:
-                        st.error("رقم المندوب والاسم إجباريين")
-                    else:
-                        db_upsert_rider({
-                            "rider_id": rid, "name": rname, "phone": rphone, "area": rarea,
-                            "vehicle_type": rvehicle, "active": 1 if ractive == "نشط" else 0,
-                        })
-                        st.success("✅ تم الحفظ")
-                        st.rerun()
-
-        with st.expander("🗑️ حذف مندوب"):
-            if not all_riders_df.empty:
-                to_del = st.selectbox("اختر مندوب للحذف", all_riders_df["rider_id"] + " - " + all_riders_df["name"])
-                if st.button("حذف نهائي", type="secondary"):
-                    db_delete_rider(to_del.split(" - ")[0])
-                    st.success("تم الحذف")
-                    st.rerun()
-    else:
-        st.caption("إضافة/حذف المناديب متاح للأدمن فقط.")
-
-# ── TAB 4: Export & sync ──────────────────────────────────────────────────
-with tabs[4]:
-    st.subheader("📤 تصدير كل التقارير مرة واحدة")
-    st.caption("بيطلع ملف Excel واحد فيه: ملخص عام، أداء المناديب، ملخص يومي، تفاصيل الطلبات، وتحليل تلقائي.")
-
-    if st.button("📊 توليد ملف التقرير الكامل", use_container_width=True):
-        st.session_state["last_report"] = build_full_report(all_orders, date_from, date_to)
-
-    if "last_report" in st.session_state:
-        st.download_button(
-            "📥 تحميل التقرير الكامل (Excel)", data=st.session_state["last_report"],
-            file_name=f"rider_tracker_report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    st.markdown('<div class="lookup-card">', unsafe_allow_html=True)
+
+    with st.form("rider_lookup"):
+        rider_id = st.text_input(
+            "Rider ID",
+            placeholder="Enter your Rider ID",
+            label_visibility="visible"
+        ).strip()
+
+        search = st.form_submit_button(
+            "View My Performance",
             use_container_width=True,
+            type="primary"
         )
 
-    st.divider()
-    st.subheader("🔄 مزامنة مع Google Sheets (لتغذية Looker Studio)")
-    if not sheets_is_configured():
-        st.warning("لسه معملتش ربط Google Sheets. اتبع خطوات README (قسم Google Sheets Setup).")
-    else:
-        st.info(f"الشيت متصل: {sheets_get_url()}")
-        if role == "admin":
-            if st.button("🔄 مزامنة البيانات دلوقتي مع Google Sheets"):
-                try:
-                    n = sheets_sync_all(all_orders, riders_summary(all_orders), daily_summary(all_orders))
-                    db_log_sync("google_sheets", n, "success")
-                    st.success(f"✅ تمت مزامنة {n} صف مع Google Sheets.")
-                except Exception as e:
-                    db_log_sync("google_sheets", 0, "error", str(e))
-                    st.error(f"❌ فشلت المزامنة: {e}")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    if search:
+        if not rider_id:
+            st.warning("Please enter your Rider ID.")
         else:
-            st.caption("زرار المزامنة متاح للأدمن فقط.")
+            data = get_performance(rider_id)
 
-    st.divider()
-    st.subheader("📜 سجل آخر عمليات المزامنة")
-    st.dataframe(db_get_sync_log(), use_container_width=True)
+            if data is None:
+                st.error("No performance record was found for this Rider ID.")
+            else:
+                name = data.get("rider_name", "").strip()
+                if not name:
+                    name = "Rider"
 
-# ── TAB 5: Settings ────────────────────────────────────────────────────────
-with tabs[5]:
-    require_admin()
-    st.subheader("⚙️ الإعدادات")
-    st.markdown("""
-    - **إدارة المستخدمين والصلاحيات:** عدّل `users.yaml` (باسورد مشفّر bcrypt لكل مستخدم).
-    - **ربط Hunger Station API:** عدّل `.streamlit/secrets.toml` تحت `[hunger_station]`.
-    - **ربط Google Sheets:** عدّل `.streamlit/secrets.toml` تحت `[gcp_service_account]`.
-    """)
-    if not all_orders.empty:
-        del_id = st.selectbox("اختر رقم طلب للحذف", all_orders["order_id"])
-        if st.button("🗑️ حذف الطلب المحدد"):
-            db_delete_order(del_id)
-            st.success("تم الحذف")
-            st.rerun()
+                segment = str(data.get("segment", "—")).strip()
+
+                st.markdown(f"""
+                <div class="profile">
+                    <div class="profile-name">{html.escape(name)}</div>
+                    <div class="profile-id">
+                        Rider ID: {html.escape(str(data.get("rider_id", rider_id)))}
+                    </div>
+                    <div class="segment {segment_class(segment)}">
+                        {html.escape(segment)}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                st.markdown('<div class="section-title">📊 Performance Overview</div>',
+                            unsafe_allow_html=True)
+
+                cols = st.columns(3)
+
+                cards = [
+                    ("Verification Score", pct(data.get("verification_success_rate"))),
+                    ("On-Time Delivery Score", pct(data.get("on_time_delivery_score"))),
+                    ("Fail Rate Score", pct(data.get("fail_rate_score"))),
+                    ("Final Delivery Quality Score", pct(data.get("final_delivery_quality_score"))),
+                    ("Gross Orders", f"{to_int(data.get('gross_orders')):,}"),
+                    ("Completed Orders", f"{to_int(data.get('completed_orders')):,}"),
+                    ("Completed Orders In-Time", f"{to_int(data.get('completed_orders_in_time')):,}"),
+                    (
+                        "Late Orders",
+                        f"{max(0, to_int(data.get('completed_orders')) - to_int(data.get('completed_orders_in_time'))):,}"
+                    ),
+                    ("Failed Orders", f"{to_int(data.get('failed_orders_by_rider')):,}"),
+                ]
+
+                for i, (label, value) in enumerate(cards):
+                    with cols[i % 3]:
+                        st.markdown(f"""
+                        <div class="metric-card">
+                            <div class="metric-label">{html.escape(label)}</div>
+                            <div class="metric-value">{html.escape(value)}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                st.markdown('<div class="section-title">🔎 Full Performance Details</div>',
+                            unsafe_allow_html=True)
+
+                details = [
+                    ("Month", data.get("month") or data.get("Month") or "—"),
+                    ("City", data.get("city_name", "—")),
+                    ("Contract", data.get("contract_name", "—")),
+                    ("Vehicle", data.get("vehicle_type", "—")),
+                    ("Verification Requests", f"{to_int(data.get('total_verification_requests')):,}"),
+                    ("Successful Verification", f"{to_int(data.get('successful_verification_requests')):,}"),
+                ]
+
+                for label, value in details:
+                    st.markdown(f"""
+                    <div class="info-line">
+                        <strong>{html.escape(label)}</strong>
+                        <span style="float:right">{html.escape(str(value))}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                st.markdown(
+                    '<div class="footer-note">Performance is based on the latest uploaded report.</div>',
+                    unsafe_allow_html=True
+                )
+
+
+# ------------------------------------------------------------
+# ADMIN
+# ------------------------------------------------------------
+
+else:
+    if not admin_login():
+        st.stop()
+
+    st.title("⚙️ Performance Admin")
+    st.caption("Upload the latest performance report and manage rider names.")
+
+    tabs = st.tabs([
+        "📥 Upload Performance",
+        "👤 Rider Names",
+        "📊 Current Data"
+    ])
+
+    # --------------------------------------------------------
+    # Upload performance
+    # --------------------------------------------------------
+    with tabs[0]:
+        st.markdown('<div class="admin-box">', unsafe_allow_html=True)
+
+        st.subheader("Upload Excel Performance Report")
+
+        uploaded = st.file_uploader(
+            "Excel file",
+            type=["xlsx", "xls"],
+            help="Upload the 3PL Delivery Quality Segmentation report."
+        )
+
+        if uploaded:
+            try:
+                df = pd.read_excel(uploaded)
+
+                missing = validate_performance_file(df)
+
+                if missing:
+                    st.error("Missing required columns:")
+                    st.code("\n".join(missing))
+                else:
+                    st.success(f"File loaded successfully — {len(df):,} rows found.")
+
+                    st.dataframe(
+                        df[PERFORMANCE_COLUMNS].head(20),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+
+                    if st.button(
+                        "💾 Import / Update Performance",
+                        type="primary",
+                        use_container_width=True
+                    ):
+                        clean = df[PERFORMANCE_COLUMNS].copy()
+
+                        clean["rider_id"] = clean["rider_id"].astype(str).str.strip()
+
+                        # Remove empty IDs
+                        clean = clean[
+                            (clean["rider_id"] != "") &
+                            (clean["rider_id"].str.lower() != "nan")
+                        ].copy()
+
+                        save_performance(clean)
+
+                        # If the Excel later contains rider_name,
+                        # automatically save it as well.
+                        if "rider_name" in df.columns:
+                            name_df = df[["rider_id", "rider_name"]].copy()
+                            name_df["rider_id"] = name_df["rider_id"].astype(str).str.strip()
+                            name_df["rider_name"] = name_df["rider_name"].astype(str).str.strip()
+                            save_names(name_df)
+
+                        st.success(
+                            f"✅ Performance updated successfully for {len(clean):,} riders."
+                        )
+
+            except Exception as e:
+                st.error(f"Could not read the Excel file: {e}")
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.info(
+            "Your current report uses the exact performance columns from the uploaded "
+            "3PL Delivery Quality Segmentation file."
+        )
+
+    # --------------------------------------------------------
+    # Rider names
+    # --------------------------------------------------------
+    with tabs[1]:
+        st.subheader("👤 Rider Names")
+
+        st.caption(
+            "The current performance Excel contains Rider ID but no rider name. "
+            "Add the name here once; it will be shown on the public performance page."
+        )
+
+        with st.form("add_name"):
+            c1, c2 = st.columns(2)
+            rid = c1.text_input("Rider ID")
+            rname = c2.text_input("Rider Name")
+
+            save = st.form_submit_button(
+                "Save Rider Name",
+                type="primary",
+                use_container_width=True
+            )
+
+        if save:
+            if not rid.strip() or not rname.strip():
+                st.error("Rider ID and Rider Name are required.")
+            else:
+                save_names(pd.DataFrame([{
+                    "rider_id": rid.strip(),
+                    "rider_name": rname.strip()
+                }]))
+                st.success("✅ Rider name saved.")
+
+        st.divider()
+
+        st.markdown("#### Bulk name upload (optional)")
+
+        names_file = st.file_uploader(
+            "Upload Excel/CSV with rider_id and rider_name",
+            type=["xlsx", "xls", "csv"],
+            key="names_file"
+        )
+
+        if names_file:
+            try:
+                if names_file.name.lower().endswith(".csv"):
+                    names_df = pd.read_csv(names_file)
+                else:
+                    names_df = pd.read_excel(names_file)
+
+                if "rider_id" not in names_df.columns or "rider_name" not in names_df.columns:
+                    st.error("The file must contain: rider_id and rider_name")
+                else:
+                    st.dataframe(
+                        names_df[["rider_id", "rider_name"]].head(20),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+
+                    if st.button(
+                        "Import Names",
+                        type="primary",
+                        use_container_width=True
+                    ):
+                        n = save_names(names_df[["rider_id", "rider_name"]])
+                        st.success(f"✅ Saved {n:,} rider names.")
+
+            except Exception as e:
+                st.error(f"Could not read names file: {e}")
+
+        current_names = load_names()
+
+        if not current_names.empty:
+            st.markdown("#### Saved names")
+            st.dataframe(
+                current_names,
+                use_container_width=True,
+                hide_index=True
+            )
+
+    # --------------------------------------------------------
+    # Current data
+    # --------------------------------------------------------
+    with tabs[2]:
+        st.subheader("📊 Current Performance Data")
+
+        current = get_all_performance()
+
+        if current.empty:
+            st.info("No performance data has been uploaded yet.")
+        else:
+            st.metric("Riders", f"{current['rider_id'].nunique():,}")
+
+            show_cols = [
+                "rider_id",
+                "rider_name",
+                "gross_orders",
+                "completed_orders",
+                "completed_orders_in_time",
+                "failed_orders_by_rider",
+                "on_time_delivery_score",
+                "fail_rate_score",
+                "final_delivery_quality_score",
+                "segment",
+            ]
+
+            st.dataframe(
+                current[show_cols],
+                use_container_width=True,
+                hide_index=True
+            )
+
+            st.download_button(
+                "📥 Download Current Data",
+                data=current.to_csv(index=False).encode("utf-8-sig"),
+                file_name="rider_performance_current.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
