@@ -246,6 +246,29 @@ st.markdown("""
     .metric-value {color:#0f172a; font-size:25px; font-weight:800;}
     .section-title {font-size:20px; font-weight:800; margin:30px 0 14px;}
     .footer-note {text-align:center; color:#94a3b8; font-size:12px; margin-top:35px;}
+    .tips {background:#fff; border:1px solid #e5e7eb; border-radius:22px; padding:24px; margin-top:30px;
+           box-shadow:0 5px 18px rgba(15,23,42,.05);}
+    .tips-title {font-size:22px; font-weight:800; margin-bottom:10px; color:#0f172a;}
+    .tip-line {color:#334155; font-size:15px; line-height:1.7; margin:3px 0;}
+    .goals {display:flex; gap:10px; flex-wrap:wrap; margin:14px 0;}
+    .goal {flex:1; min-width:120px; background:#f0fdf4; border:1px solid #bbf7d0; border-radius:16px;
+           padding:14px; text-align:center;}
+    .goal-v {font-size:26px; font-weight:900; color:#16a34a;}
+    .goal-l {font-size:13px; color:#475569; font-weight:600; margin-top:4px;}
+    .tips-note {background:#fffbeb; border:1px solid #fde68a; color:#92400e; border-radius:14px;
+                padding:12px 15px; font-size:14px; font-weight:600; margin:6px 0 18px;}
+    .tips-sub {font-size:18px; font-weight:800; color:#0f172a; margin:8px 0 12px;}
+    .tip-step {display:flex; gap:12px; background:#f8fafc; border:1px solid #e5e7eb; border-radius:16px;
+               padding:14px; margin-bottom:10px;}
+    .tip-num {flex:0 0 32px; height:32px; border-radius:50%; background:#0f172a; color:#fff;
+              font-weight:800; display:flex; align-items:center; justify-content:center;}
+    .tip-step-title {font-weight:800; color:#0f172a; margin-bottom:4px;}
+    .tip-quote {background:#7c3f2b; color:#fff; border-radius:12px; padding:9px 13px; margin:8px 0;
+                display:inline-block; font-size:14px;}
+    .tips-avoid {background:#fef2f2; border:1px solid #fecaca; color:#991b1b; border-radius:14px;
+                 padding:13px 15px; margin-top:16px; font-size:15px; line-height:1.7;}
+    .tips-closing {margin-top:14px; font-weight:700; color:#0f172a; text-align:center;}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -366,6 +389,164 @@ TEXTS = {
     },
 }
 
+
+# أسطر تبدأ بـ ">" تظهر كاقتباس (رسالة يرسلها المندوب)
+TIPS = {
+    "en": {
+        "title": "How to improve your Segment",
+        "intro": "To improve your performance and raise your Segment, focus on these 3 metrics:",
+        "note": "Most riders struggle with On-Time, and everyone must improve it.",
+        "howto": "How to improve On-Time",
+        "steps": [
+            ("At the restaurant", [
+                "When you arrive at the restaurant, open the in-app chat between you and the customer and send:",
+                "> Hello sir, I'm at the restaurant and the order is not ready",
+                "Even if the order is ready, you must tell the customer it is not ready.",
+            ]),
+            ("After picking up the order", [
+                "Take a photo of the order and send it to the customer.",
+                "Take a screenshot of the distance between you and the customer and send it to them.",
+                "If you face any traffic on the way, quickly take a photo and send it to the customer.",
+                "If traffic happens repeatedly, take a photo and send it every time.",
+            ]),
+            ("When you reach the customer", [
+                "In the chat, send the customer: I'm here",
+                "Send a photo of the building.",
+                "Call the customer.",
+            ]),
+        ],
+        "avoid_title": "Avoid this",
+        "avoid": "Talking to the customer on WhatsApp is strictly forbidden.",
+        "closing": "Follow the instructions above to improve your performance and your salary.",
+        "img": "Example of the messages to send in the chat",
+    },
+    "ar": {
+        "title": "كيف ترفع الـ Segment الخاص بك",
+        "intro": "لتحسين أدائك ورفع الـ Segment لازم تركز على 3 نقاط:",
+        "note": "أغلب المناديب بيواجهوا مشكلة في الأون تايم، ولازم الجميع يحسّنه.",
+        "howto": "كيفية تحسين الأون تايم",
+        "steps": [
+            ("عند الوصول للمطعم", [
+                "عند وصولك إلى المطعم افتح الشات الموجود في التطبيق بينك وبين العميل وأرسل له:",
+                "> هالو سير، أنا في المطعم والطلب غير جاهز",
+                "حتى لو الأوردر جاهز، يجب أن ترسل له أنه غير جاهز.",
+            ]),
+            ("بعد استلام الطلب", [
+                "التقط صورة للأوردر وأرسلها للعميل.",
+                "التقط لقطة شاشة للمسافة بينك وبين العميل وأرسلها له.",
+                "إذا واجهت أي ازدحام في الطريق، التقط صورة بسرعة وأرسلها للعميل.",
+                "وإذا تكرر الازدحام، التقط صورة وأرسلها في كل مرة.",
+            ]),
+            ("عند الوصول للعميل", [
+                "أرسل له في الشات: أنا هنا",
+                "أرسل له صورة المبنى.",
+                "واتصل به اتصالًا.",
+            ]),
+        ],
+        "avoid_title": "تجنب هذا",
+        "avoid": "يمنع منعًا باتًا التحدث مع العميل على واتساب.",
+        "closing": "اتبع التعليمات السابقة لتحسين أدائك وتحسين راتبك.",
+        "img": "مثال على الرسائل التي ترسلها في الشات",
+    },
+    "ur": {
+        "title": "اپنا سیگمنٹ کیسے بہتر کریں",
+        "intro": "اپنی کارکردگی بہتر بنانے اور سیگمنٹ بڑھانے کے لیے ان 3 نکات پر توجہ دیں:",
+        "note": "اکثر رائیڈرز کو بروقت ڈیلیوری میں مسئلہ ہوتا ہے، اور سب کو اسے بہتر کرنا ہوگا۔",
+        "howto": "بروقت ڈیلیوری کیسے بہتر کریں",
+        "steps": [
+            ("ریسٹورنٹ پہنچنے پر", [
+                "ریسٹورنٹ پہنچتے ہی ایپ میں اپنے اور کسٹمر کے درمیان چیٹ کھولیں اور بھیجیں:",
+                "> ہیلو سر، میں ریسٹورنٹ میں ہوں اور آرڈر تیار نہیں ہے",
+                "چاہے آرڈر تیار ہو، پھر بھی کسٹمر کو بتانا ضروری ہے کہ آرڈر تیار نہیں ہے۔",
+            ]),
+            ("آرڈر لینے کے بعد", [
+                "آرڈر کی تصویر لے کر کسٹمر کو بھیجیں۔",
+                "اپنے اور کسٹمر کے درمیان فاصلے کا اسکرین شاٹ لے کر انہیں بھیجیں۔",
+                "اگر راستے میں ٹریفک ہو تو فوراً تصویر لے کر کسٹمر کو بھیجیں۔",
+                "اگر بار بار ٹریفک ہو تو ہر بار تصویر لے کر بھیجیں۔",
+            ]),
+            ("کسٹمر کے پاس پہنچ کر", [
+                "چیٹ میں کسٹمر کو لکھیں: میں یہاں ہوں",
+                "عمارت کی تصویر بھیجیں۔",
+                "اور کسٹمر کو کال کریں۔",
+            ]),
+        ],
+        "avoid_title": "اس سے بچیں",
+        "avoid": "کسٹمر سے واٹس ایپ پر بات کرنا سختی سے منع ہے۔",
+        "closing": "اپنی کارکردگی اور تنخواہ بہتر بنانے کے لیے اوپر دی گئی ہدایات پر عمل کریں۔",
+        "img": "چیٹ میں بھیجے جانے والے پیغامات کی مثال",
+    },
+    "bn": {
+        "title": "আপনার সেগমেন্ট কীভাবে উন্নত করবেন",
+        "intro": "পারফরম্যান্স ভালো করতে এবং সেগমেন্ট বাড়াতে এই ৩টি বিষয়ে মনোযোগ দিন:",
+        "note": "বেশিরভাগ রাইডারের সময়মতো ডেলিভারিতে সমস্যা হয়, এবং সবাইকে এটি উন্নত করতে হবে।",
+        "howto": "সময়মতো ডেলিভারি কীভাবে উন্নত করবেন",
+        "steps": [
+            ("রেস্টুরেন্টে পৌঁছে", [
+                "রেস্টুরেন্টে পৌঁছে অ্যাপে আপনার ও কাস্টমারের চ্যাট খুলুন এবং পাঠান:",
+                "> হ্যালো স্যার, আমি রেস্টুরেন্টে আছি এবং অর্ডার এখনো প্রস্তুত নয়",
+                "অর্ডার প্রস্তুত থাকলেও কাস্টমারকে জানাতে হবে যে এটি প্রস্তুত নয়।",
+            ]),
+            ("অর্ডার নেওয়ার পর", [
+                "অর্ডারের ছবি তুলে কাস্টমারকে পাঠান।",
+                "আপনার ও কাস্টমারের মধ্যে দূরত্বের স্ক্রিনশট নিয়ে তাকে পাঠান।",
+                "রাস্তায় যানজট হলে দ্রুত একটি ছবি তুলে কাস্টমারকে পাঠান।",
+                "বারবার যানজট হলে প্রতিবার ছবি তুলে পাঠান।",
+            ]),
+            ("কাস্টমারের কাছে পৌঁছে", [
+                "চ্যাটে কাস্টমারকে লিখুন: আমি এখানে আছি",
+                "ভবনের ছবি পাঠান।",
+                "এবং কাস্টমারকে ফোন করুন।",
+            ]),
+        ],
+        "avoid_title": "এটি এড়িয়ে চলুন",
+        "avoid": "কাস্টমারের সাথে হোয়াটসঅ্যাপে কথা বলা কঠোরভাবে নিষিদ্ধ।",
+        "closing": "পারফরম্যান্স ও বেতন উন্নত করতে উপরের নির্দেশনাগুলো অনুসরণ করুন।",
+        "img": "চ্যাটে পাঠানোর মেসেজের উদাহরণ",
+    },
+}
+
+TIPS_IMAGE = Path(__file__).parent / "tips_chat.jpg"
+
+
+def render_tips(T, K):
+    """K = TIPS[lang]; T = TEXTS[lang] (لأسماء المقاييس)."""
+    goals = [(T["verification"], "100%"), (T["fail"], "100%"), (T["on_time"], "98%")]
+    chips = "".join(
+        f'<div class="goal"><div class="goal-v">{v}</div><div class="goal-l">{html.escape(l)}</div></div>'
+        for l, v in goals
+    )
+
+    steps_html = ""
+    for i, (title, lines) in enumerate(K["steps"], 1):
+        body = ""
+        for ln in lines:
+            if ln.startswith(">"):
+                body += f'<div class="tip-quote">{html.escape(ln[1:].strip())}</div>'
+            else:
+                body += f'<div class="tip-line">{html.escape(ln)}</div>'
+        steps_html += (
+            f'<div class="tip-step"><div class="tip-num">{i}</div>'
+            f'<div class="tip-body"><div class="tip-step-title">{html.escape(title)}</div>{body}</div></div>'
+        )
+
+    st.markdown(
+        f"""<div class="tips">
+<div class="tips-title">💡 {html.escape(K["title"])}</div>
+<div class="tip-line">{html.escape(K["intro"])}</div>
+<div class="goals">{chips}</div>
+<div class="tips-note">{html.escape(K["note"])}</div>
+<div class="tips-sub">{html.escape(K["howto"])}</div>
+{steps_html}
+<div class="tips-avoid"><strong>🚫 {html.escape(K["avoid_title"])}</strong><br>{html.escape(K["avoid"])}</div>
+<div class="tips-closing">{html.escape(K["closing"])}</div>
+</div>""",
+        unsafe_allow_html=True,
+    )
+
+    if TIPS_IMAGE.exists():
+        st.image(str(TIPS_IMAGE), caption=K["img"])
+
 if page == "Rider Performance":
     lang_name = st.radio("Language", list(LANGS.keys()), horizontal=True,
                          key="lang", label_visibility="collapsed")
@@ -375,10 +556,10 @@ if page == "Rider Performance":
     if lang in RTL_LANGS:
         st.markdown("""
         <style>
-            .brand, .profile, .metric-card, .section-title, .footer-note,
+            .brand, .profile, .metric-card, .section-title, .footer-note, .tips,
             [data-testid="stForm"] {direction: rtl; text-align: right;}
             .brand {text-align: center;}
-            .footer-note {text-align: center;}
+            .footer-note, .tips-closing {text-align: center;}
         </style>
         """, unsafe_allow_html=True)
 
@@ -447,6 +628,8 @@ if page == "Rider Performance":
                         <div class="metric-value"{style}>{html.escape(value)}</div>
                     </div>
                     """, unsafe_allow_html=True)
+
+            render_tips(T, TIPS[lang])
 
             st.markdown(
                 f'<div class="footer-note">{html.escape(T["footer"])}</div>',
