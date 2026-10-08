@@ -102,13 +102,32 @@ def get_conn():
 
 
 def replace_all_data(df):
-    """يمسح القديم ويحط الجديد."""
+    """يمسح القديم ويحط الجديد، مع الاحتفاظ بآخر سيجمنت/مؤشرات لكل رايدر فقط."""
     conn = get_conn()
     conn.execute("DROP TABLE IF EXISTS performance")  # جداول النسخة القديمة
     conn.execute("DROP TABLE IF EXISTS riders")
+
+    df = df.copy()
+    try:
+        old = pd.read_sql_query(
+            f"""SELECT rider_id,
+                       segment AS prev_segment,
+                       on_time_rate AS prev_on_time,
+                       verification_rate AS prev_verification,
+                       fail_rate AS prev_fail,
+                       final_score AS prev_final
+                FROM {TABLE}""",
+            conn,
+        ).drop_duplicates("rider_id")
+        df = df.merge(old, on="rider_id", how="left")
+    except Exception:
+        for c in ["prev_segment", "prev_on_time", "prev_verification", "prev_fail", "prev_final"]:
+            df[c] = None
+
     df.to_sql(TABLE, conn, if_exists="replace", index=False)
     conn.commit()
     conn.close()
+    return int(df["prev_segment"].notna().sum())
 
 
 def table_exists():
@@ -246,6 +265,17 @@ st.markdown("""
     .metric-value {color:#0f172a; font-size:25px; font-weight:800;}
     .section-title {font-size:20px; font-weight:800; margin:30px 0 14px;}
     .footer-note {text-align:center; color:#94a3b8; font-size:12px; margin-top:35px;}
+    .seg-change {border-radius:20px; padding:18px 22px; margin-top:18px; border:2px solid;}
+    .seg-up {background:#f0fdf4; border-color:#16a34a; color:#14532d;}
+    .seg-down {background:#fef2f2; border-color:#dc2626; color:#7f1d1d;}
+    .seg-same {background:#eff6ff; border-color:#2563eb; color:#1e3a8a;}
+    .seg-none {background:#f8fafc; border:1px dashed #cbd5e1; color:#64748b; font-size:13px; text-align:center;}
+    .seg-change-title {font-size:18px; font-weight:800;}
+    .seg-change-big {font-size:34px; font-weight:900; margin:4px 0;}
+    .seg-change-sub {font-size:13px; opacity:.8;}
+    .seg-reason {margin-top:12px; padding-top:10px; border-top:1px solid rgba(0,0,0,.12); font-size:15px; line-height:1.7;}
+    .seg-reason ul {margin:6px 0 0; padding-inline-start:20px;}
+
     .tips {background:#fff; border:1px solid #e5e7eb; border-radius:22px; padding:24px; margin-top:30px;
            box-shadow:0 5px 18px rgba(15,23,42,.05);}
     .tips-title {font-size:22px; font-weight:800; margin-bottom:10px; color:#0f172a;}
@@ -547,6 +577,90 @@ def render_tips(T, K):
     if TIPS_IMAGE.exists():
         st.image(str(TIPS_IMAGE), caption=K["img"])
 
+
+CHANGE = {
+    "en": {"up": "⬆️ Great job! Your Segment went up", "down": "⬇️ Your Segment went down",
+           "same": "➡️ Your Segment stayed the same", "prev": "Previous Segment",
+           "reason": "Why? These metrics are below the target:", "target": "Target", "was": "was",
+           "generic": "Your overall delivery quality dropped compared to last time. Follow the tips below to improve.",
+           "none": "No previous Segment recorded yet."},
+    "ar": {"up": "⬆️ أحسنت! ارتفع الـ Segment الخاص بك", "down": "⬇️ انخفض الـ Segment الخاص بك",
+           "same": "➡️ الـ Segment الخاص بك لم يتغير", "prev": "الـ Segment السابق",
+           "reason": "السبب: هذه المؤشرات أقل من المطلوب:", "target": "المطلوب", "was": "كان",
+           "generic": "انخفضت جودة التوصيل الإجمالية مقارنة بالمرة السابقة. اتبع النصائح بالأسفل للتحسين.",
+           "none": "لا يوجد Segment سابق مسجّل بعد."},
+    "ur": {"up": "⬆️ شاباش! آپ کا سیگمنٹ بڑھ گیا ہے", "down": "⬇️ آپ کا سیگمنٹ کم ہو گیا ہے",
+           "same": "➡️ آپ کا سیگمنٹ وہی رہا", "prev": "پچھلا سیگمنٹ",
+           "reason": "وجہ: یہ اشاریے مطلوبہ ہدف سے کم ہیں:", "target": "ہدف", "was": "پہلے",
+           "generic": "پچھلی بار کے مقابلے میں آپ کی مجموعی ڈیلیوری کوالٹی کم ہوئی ہے۔ بہتری کے لیے نیچے دی گئی ہدایات پر عمل کریں۔",
+           "none": "ابھی تک کوئی پچھلا سیگمنٹ ریکارڈ نہیں ہے۔"},
+    "bn": {"up": "⬆️ দারুণ! আপনার সেগমেন্ট বেড়েছে", "down": "⬇️ আপনার সেগমেন্ট কমেছে",
+           "same": "➡️ আপনার সেগমেন্ট একই আছে", "prev": "আগের সেগমেন্ট",
+           "reason": "কারণ: এই মেট্রিকগুলো লক্ষ্যমাত্রার চেয়ে কম:", "target": "লক্ষ্য", "was": "আগে ছিল",
+           "generic": "আগের বারের তুলনায় আপনার সামগ্রিক ডেলিভারি কোয়ালিটি কমেছে। উন্নতির জন্য নিচের টিপসগুলো অনুসরণ করুন।",
+           "none": "এখনো কোনো আগের সেগমেন্ট রেকর্ড করা নেই।"},
+}
+
+SEG_ORDER = "ABCDEF"
+# المؤشرات الثلاثة المطلوبة: (مفتاح الحالي، مفتاح السابق، المطلوب، اسم العرض)
+TARGETS = [
+    ("verification_rate", "prev_verification", 100.0, "verification"),
+    ("fail_rate", "prev_fail", 100.0, "fail"),
+    ("on_time_rate", "prev_on_time", 98.0, "on_time"),
+]
+
+
+def render_segment_change(d, seg, T, C):
+    prev = d.get("prev_segment")
+    prev = "" if prev is None or (isinstance(prev, float) and pd.isna(prev)) else str(prev).strip()
+
+    if prev.lower() in ("", "nan", "none", "—"):
+        st.markdown(f'<div class="seg-change seg-none">{html.escape(C["none"])}</div>',
+                    unsafe_allow_html=True)
+        return
+
+    cur_u, prev_u = seg.strip().upper(), prev.upper()
+    direction = "same"
+    if cur_u != prev_u and cur_u in SEG_ORDER and prev_u in SEG_ORDER:
+        direction = "up" if SEG_ORDER.index(cur_u) < SEG_ORDER.index(prev_u) else "down"
+
+    css = {"up": "seg-up", "down": "seg-down", "same": "seg-same"}[direction]
+    arrow_line = f'{html.escape(prev)} → {html.escape(seg)}' if direction != "same" else html.escape(seg)
+
+    reason_html = ""
+    if direction == "down":
+        items = ""
+        for cur_key, prev_key, target, label_key in TARGETS:
+            val = to_float_safe(d.get(cur_key))
+            if val is not None and val < target - 1e-9:
+                old = to_float_safe(d.get(prev_key))
+                was = f' — {html.escape(C["was"])} {fmt_pct(old)}' if old is not None else ""
+                items += (f'<li><strong>{html.escape(T[label_key])}</strong>: {fmt_pct(val)} '
+                          f'({html.escape(C["target"])} {target:g}%){was}</li>')
+        if items:
+            reason_html = f'<div class="seg-reason">{html.escape(C["reason"])}<ul>{items}</ul></div>'
+        else:
+            reason_html = f'<div class="seg-reason">{html.escape(C["generic"])}</div>'
+
+    st.markdown(
+        f"""<div class="seg-change {css}">
+<div class="seg-change-title">{html.escape(C[direction])}</div>
+<div class="seg-change-big">{arrow_line}</div>
+<div class="seg-change-sub">{html.escape(C["prev"])}: {html.escape(prev)}</div>
+{reason_html}
+</div>""",
+        unsafe_allow_html=True,
+    )
+
+
+def to_float_safe(v):
+    try:
+        if v is None or pd.isna(v):
+            return None
+        return float(v)
+    except Exception:
+        return None
+
 if page == "Rider Performance":
     lang_name = st.radio("Language", list(LANGS.keys()), horizontal=True,
                          key="lang", label_visibility="collapsed")
@@ -556,7 +670,7 @@ if page == "Rider Performance":
     if lang in RTL_LANGS:
         st.markdown("""
         <style>
-            .brand, .profile, .metric-card, .section-title, .footer-note, .tips,
+            .brand, .profile, .metric-card, .section-title, .footer-note, .tips, .seg-change,
             [data-testid="stForm"] {direction: rtl; text-align: right;}
             .brand {text-align: center;}
             .footer-note, .tips-closing {text-align: center;}
@@ -603,6 +717,8 @@ if page == "Rider Performance":
                 <div style="display:inline-block;min-width:76px;text-align:center;border-radius:14px;padding:10px 18px;font-size:25px;font-weight:900;margin-top:4px;background:{segment_color(seg)};color:#ffffff;">{html.escape(seg)}</div>
             </div>
             """, unsafe_allow_html=True)
+
+            render_segment_change(d, seg, T, CHANGE[lang])
 
             st.markdown(f'<div class="section-title">{html.escape(T["overview"])}</div>',
                         unsafe_allow_html=True)
@@ -684,8 +800,11 @@ else:
                              use_container_width=True, hide_index=True)
 
                 if st.button("💾 مسح القديم ورفع الجديد", type="primary", use_container_width=True):
-                    replace_all_data(clean)
-                    st.success(f"✅ تم. البيانات القديمة اتمسحت واتحمّل {len(clean):,} رايدر.")
+                    with_prev = replace_all_data(clean)
+                    st.success(
+                        f"✅ تم. البيانات القديمة اتمسحت واتحمّل {len(clean):,} رايدر "
+                        f"({with_prev:,} منهم ليهم سيجمنت سابق)."
+                    )
 
     with tab_data:
         current = get_all()
