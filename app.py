@@ -695,28 +695,32 @@ DAILY = {
            "none": "No working days recorded yet",
            "deficit": "You are {d} orders behind the target.",
            "need": "To make it up, you need about {y} orders per day for the remaining {r} days (if you work every day).",
-           "ended": "There are no days left this month to make it up."},
+           "ended": "There are no days left this month to make it up.",
+           "nodata": "No daily-target data for your ID yet."},
     "ar": {"title": "🎯 التارجت اليومي بتاعك", "total": "إجمالي طلباتك", "avg": "متوسطك اليومي",
            "target": "التارجت / يوم", "days_hit": "أيام حققت فيها التارجت",
            "ok": "✅ أنت ماشي على التارجت", "bad": "⚠️ أنت أقل من التارجت",
            "none": "لا توجد أيام عمل مسجّلة بعد",
            "deficit": "ناقصك {d} طلب عشان توصل للتارجت.",
            "need": "عشان تعوّض محتاج حوالي {y} طلب في اليوم في الأيام المتبقية ({r} يوم)، لو اشتغلت كل يوم.",
-           "ended": "مفيش أيام متبقية في الشهر للتعويض."},
+           "ended": "مفيش أيام متبقية في الشهر للتعويض.",
+           "nodata": "لا توجد بيانات تارجت يومي لرقمك حتى الآن."},
     "ur": {"title": "🎯 آپ کا یومیہ ٹارگٹ", "total": "آپ کے کل آرڈرز", "avg": "یومیہ اوسط",
            "target": "ٹارگٹ / دن", "days_hit": "ٹارگٹ پورا کرنے والے دن",
            "ok": "✅ آپ ٹارگٹ پر ہیں", "bad": "⚠️ آپ ٹارگٹ سے پیچھے ہیں",
            "none": "ابھی تک کوئی کام کا دن ریکارڈ نہیں ہوا",
            "deficit": "آپ ٹارگٹ سے {d} آرڈرز پیچھے ہیں۔",
            "need": "اسے پورا کرنے کے لیے آپ کو باقی {r} دنوں میں روزانہ تقریباً {y} آرڈرز چاہئیں (اگر آپ ہر دن کام کریں)۔",
-           "ended": "اس مہینے میں پورا کرنے کے لیے کوئی دن باقی نہیں۔"},
+           "ended": "اس مہینے میں پورا کرنے کے لیے کوئی دن باقی نہیں۔",
+           "nodata": "آپ کی آئی ڈی کے لیے ابھی تک یومیہ ٹارگٹ کا ڈیٹا موجود نہیں۔"},
     "bn": {"title": "🎯 আপনার দৈনিক টার্গেট", "total": "আপনার মোট অর্ডার", "avg": "দৈনিক গড়",
            "target": "টার্গেট / দিন", "days_hit": "টার্গেট পূরণের দিন",
            "ok": "✅ আপনি টার্গেটের পথে আছেন", "bad": "⚠️ আপনি টার্গেটের চেয়ে পিছিয়ে আছেন",
            "none": "এখনো কোনো কাজের দিন রেকর্ড হয়নি",
            "deficit": "আপনি টার্গেটের চেয়ে {d}টি অর্ডার পিছিয়ে আছেন।",
            "need": "এটি পূরণ করতে বাকি {r} দিনে প্রতিদিন প্রায় {y}টি অর্ডার দরকার (যদি প্রতিদিন কাজ করেন)।",
-           "ended": "এই মাসে পূরণ করার মতো কোনো দিন বাকি নেই।"},
+           "ended": "এই মাসে পূরণ করার মতো কোনো দিন বাকি নেই।",
+           "nodata": "আপনার আইডির জন্য এখনো দৈনিক টার্গেটের কোনো তথ্য নেই।"},
 }
 
 
@@ -764,6 +768,10 @@ def get_daily_cards(rider_id):
 
 
 def render_daily_target(cards, D, lang):
+    if not cards:
+        st.markdown('<div class="daily-card none"><div class="dc-status" style="font-size:15px;margin:0">'
+                    + html.escape(D["nodata"]) + "</div></div>", unsafe_allow_html=True)
+        return
     for c in cards:
         pname = PNAMES[c["key"]][lang]
         if c["days_worked"] == 0:
