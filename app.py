@@ -1,5 +1,7 @@
+import calendar
 import hmac
 import html
+import math
 import re
 import sqlite3
 from datetime import datetime
@@ -265,6 +267,20 @@ st.markdown("""
     .metric-value {color:#0f172a; font-size:25px; font-weight:800;}
     .section-title {font-size:20px; font-weight:800; margin:30px 0 14px;}
     .footer-note {text-align:center; color:#94a3b8; font-size:12px; margin-top:35px;}
+    .daily-card {border-radius:20px; padding:18px 20px; margin-top:18px; border:2px solid;}
+    .daily-card.ok {background:#f0fdf4; border-color:#16a34a; color:#14532d;}
+    .daily-card.bad {background:#fef2f2; border-color:#dc2626; color:#7f1d1d;}
+    .daily-card.none {background:#f8fafc; border-color:#cbd5e1; color:#475569;}
+    .dc-head {display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:15px;}
+    .dc-head b {font-size:17px;} .dc-head span {font-size:12px; opacity:.7; font-weight:700;}
+    .dc-status {font-size:22px; font-weight:800; margin:8px 0 12px;}
+    .dc-grid {display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:8px;}
+    .dc-stat {background:rgba(255,255,255,.75); border-radius:14px; padding:10px; text-align:center;}
+    .dc-stat b {display:block; font-size:22px; font-weight:800; color:#0f172a;}
+    .dc-stat small {font-size:11px; color:#64748b; font-weight:700;}
+    .dc-need {margin-top:12px; padding-top:10px; border-top:1px solid rgba(0,0,0,.12); font-size:15px; line-height:1.9; font-weight:600;}
+    .dc-need b {font-size:19px;}
+
     .seg-change {border-radius:20px; padding:18px 22px; margin-top:18px; border:2px solid;}
     .seg-up {background:#f0fdf4; border-color:#16a34a; color:#14532d;}
     .seg-down {background:#fef2f2; border-color:#dc2626; color:#7f1d1d;}
@@ -661,6 +677,149 @@ def to_float_safe(v):
     except Exception:
         return None
 
+
+# ============================================================
+# المتابعة اليومية للتارجت (من بيانات شيتات هنجر / جاهز / شيفز)
+# البيانات بتتخزن من تاب "Daily Sheets" في الأدمن (نفس مكتبة tracker.py)
+# ============================================================
+PNAMES = {
+    "hunger": {"en": "HungerStation", "ar": "هنجر ستيشن", "ur": "ہنگر اسٹیشن", "bn": "হাঙ্গার স্টেশন"},
+    "jahez": {"en": "Jahez", "ar": "جاهز", "ur": "جاہز", "bn": "জাহেজ"},
+    "chefz": {"en": "The Chefz", "ar": "ذا شيفز", "ur": "دی شیفز", "bn": "দ্য শেফজ"},
+}
+
+DAILY = {
+    "en": {"title": "🎯 Your Daily Target", "total": "Your total orders", "avg": "Daily average",
+           "target": "Target / day", "days_hit": "Days you hit the target",
+           "ok": "✅ You are on track with the target", "bad": "⚠️ You are below the target",
+           "none": "No working days recorded yet",
+           "deficit": "You are {d} orders behind the target.",
+           "need": "To make it up, you need about {y} orders per day for the remaining {r} days (if you work every day).",
+           "ended": "There are no days left this month to make it up."},
+    "ar": {"title": "🎯 التارجت اليومي بتاعك", "total": "إجمالي طلباتك", "avg": "متوسطك اليومي",
+           "target": "التارجت / يوم", "days_hit": "أيام حققت فيها التارجت",
+           "ok": "✅ أنت ماشي على التارجت", "bad": "⚠️ أنت أقل من التارجت",
+           "none": "لا توجد أيام عمل مسجّلة بعد",
+           "deficit": "ناقصك {d} طلب عشان توصل للتارجت.",
+           "need": "عشان تعوّض محتاج حوالي {y} طلب في اليوم في الأيام المتبقية ({r} يوم)، لو اشتغلت كل يوم.",
+           "ended": "مفيش أيام متبقية في الشهر للتعويض."},
+    "ur": {"title": "🎯 آپ کا یومیہ ٹارگٹ", "total": "آپ کے کل آرڈرز", "avg": "یومیہ اوسط",
+           "target": "ٹارگٹ / دن", "days_hit": "ٹارگٹ پورا کرنے والے دن",
+           "ok": "✅ آپ ٹارگٹ پر ہیں", "bad": "⚠️ آپ ٹارگٹ سے پیچھے ہیں",
+           "none": "ابھی تک کوئی کام کا دن ریکارڈ نہیں ہوا",
+           "deficit": "آپ ٹارگٹ سے {d} آرڈرز پیچھے ہیں۔",
+           "need": "اسے پورا کرنے کے لیے آپ کو باقی {r} دنوں میں روزانہ تقریباً {y} آرڈرز چاہئیں (اگر آپ ہر دن کام کریں)۔",
+           "ended": "اس مہینے میں پورا کرنے کے لیے کوئی دن باقی نہیں۔"},
+    "bn": {"title": "🎯 আপনার দৈনিক টার্গেট", "total": "আপনার মোট অর্ডার", "avg": "দৈনিক গড়",
+           "target": "টার্গেট / দিন", "days_hit": "টার্গেট পূরণের দিন",
+           "ok": "✅ আপনি টার্গেটের পথে আছেন", "bad": "⚠️ আপনি টার্গেটের চেয়ে পিছিয়ে আছেন",
+           "none": "এখনো কোনো কাজের দিন রেকর্ড হয়নি",
+           "deficit": "আপনি টার্গেটের চেয়ে {d}টি অর্ডার পিছিয়ে আছেন।",
+           "need": "এটি পূরণ করতে বাকি {r} দিনে প্রতিদিন প্রায় {y}টি অর্ডার দরকার (যদি প্রতিদিন কাজ করেন)।",
+           "ended": "এই মাসে পূরণ করার মতো কোনো দিন বাকি নেই।"},
+}
+
+
+def get_daily_cards(rider_id):
+    """يرجّع كارت لكل منصة المندوب موجود فيها (آخر شهر محفوظ). لو حصل أي مشكلة بيرجّع [] ومفيش حاجة بتتكسر."""
+    try:
+        import tracker as TR
+        TR.init_db()
+        cards = []
+        for key, cfg in TR.PLATFORMS.items():
+            months = TR.list_months(key)
+            if not months:
+                continue
+            month = months[0]
+            df = TR.load_month(key, month)
+            mine = df[df["rider_id"] == rider_id]
+            if mine.empty:
+                continue
+
+            target = cfg["target"]
+            on = mine[mine["status"] == "on"]
+            days_worked = int(len(on))
+            total = int(on["orders"].fillna(0).sum())
+            days_hit = int((on["orders"] >= target).sum())
+            avg = total / days_worked if days_worked else 0.0
+
+            y, m = (int(x) for x in month.split("-"))
+            last = df["date"].max()
+            dim = calendar.monthrange(y, m)[1]
+            remaining = max(dim - last.day, 0) if (last.year, last.month) == (y, m) else 0
+
+            deficit = max(math.ceil(target * days_worked - total - 1e-9), 0)
+            need = math.ceil(target + deficit / remaining) if (deficit > 0 and remaining > 0) else None
+            name = next((n for n in mine["rider_name"] if n), "")
+
+            cards.append({
+                "key": key, "month": month, "name": name, "target": target, "total": total,
+                "days_worked": days_worked, "days_hit": days_hit, "avg": avg,
+                "on_track": days_worked > 0 and avg >= target,
+                "deficit": deficit, "remaining": remaining, "need": need,
+            })
+        return cards
+    except Exception:
+        return []
+
+
+def render_daily_target(cards, D, lang):
+    for c in cards:
+        pname = PNAMES[c["key"]][lang]
+        if c["days_worked"] == 0:
+            cls, status = "none", D["none"]
+        elif c["on_track"]:
+            cls, status = "ok", D["ok"]
+        else:
+            cls, status = "bad", D["bad"]
+
+        extra = ""
+        if cls == "bad":
+            d_txt = D["deficit"].format(d="<b>" + str(c["deficit"]) + "</b>")
+            extra = '<div class="dc-need"><div>' + d_txt + "</div>"
+            if c["need"]:
+                n_txt = D["need"].format(y="<b>" + str(c["need"]) + "</b>", r=c["remaining"])
+                extra += "<div>" + n_txt + "</div>"
+            else:
+                extra += "<div>" + D["ended"] + "</div>"
+            extra += "</div>"
+
+        st.markdown(
+            f"""<div class="daily-card {cls}">
+<div class="dc-head"><b>{html.escape(D["title"])} · {html.escape(pname)}</b><span>{html.escape(c["month"])}</span></div>
+<div class="dc-status">{html.escape(status)}</div>
+<div class="dc-grid">
+<div class="dc-stat"><b>{c["total"]:,}</b><small>{html.escape(D["total"])}</small></div>
+<div class="dc-stat"><b>{c["avg"]:.1f}</b><small>{html.escape(D["avg"])}</small></div>
+<div class="dc-stat"><b>{c["target"]}</b><small>{html.escape(D["target"])}</small></div>
+<div class="dc-stat"><b>{c["days_hit"]} / {c["days_worked"]}</b><small>{html.escape(D["days_hit"])}</small></div>
+</div>{extra}</div>""",
+            unsafe_allow_html=True,
+        )
+
+
+def daily_admin_ui():
+    """تاب الأدمن لرفع شيتات هنجر / جاهز / شيفز اليومية (بنفس قارئ tracker.py)."""
+    import tracker as TR
+    TR.init_db()
+    flash = st.session_state.pop("flash", None)
+    if flash:
+        st.success(flash)
+    st.info("ارفع شيت كل منصة (المجمّع بكل أيام الشهر). الشهر اللي في الملف بس بيتحدّث، والشهور القديمة بتفضل.")
+    c1, c2 = st.columns(2)
+    year = c1.number_input("السنة", min_value=2020, max_value=2100, value=datetime.now().year, step=1)
+    month = c2.selectbox("الشهر (بيُستخدم بس لو الشيت بيكتب أرقام الأيام 1، 2، 3 من غير شهر)",
+                         list(range(1, 13)), index=datetime.now().month - 1)
+    for key, cfg in TR.PLATFORMS.items():
+        st.markdown(f"#### {cfg['icon']} {cfg['name']} — التارجت {cfg['target']} طلب/يوم")
+        saved = TR.list_months(key)
+        st.caption("المحفوظ: " + ("، ".join(saved) if saved else "لا شيء"))
+        up = st.file_uploader("الملف", type=["xlsx", "xls", "csv"], key=f"dfile_{key}",
+                              label_visibility="collapsed")
+        if up:
+            TR.upload_card(key, up, int(year), int(month))
+        st.divider()
+
 if page == "Rider Performance":
     lang_name = st.radio("Language", list(LANGS.keys()), horizontal=True,
                          key="lang", label_visibility="collapsed")
@@ -670,7 +829,7 @@ if page == "Rider Performance":
     if lang in RTL_LANGS:
         st.markdown("""
         <style>
-            .brand, .profile, .metric-card, .section-title, .footer-note, .tips, .seg-change,
+            .brand, .profile, .metric-card, .section-title, .footer-note, .tips, .seg-change, .daily-card,
             [data-testid="stForm"] {direction: rtl; text-align: right;}
             .brand {text-align: center;}
             .footer-note, .tips-closing {text-align: center;}
@@ -701,7 +860,17 @@ if page == "Rider Performance":
 
     if shown_id:
         d = get_rider(shown_id)
-        if d is None:
+        daily_cards = get_daily_cards(shown_id)
+        if d is None and daily_cards:
+            nm = daily_cards[0]["name"] or T["rider"]
+            st.markdown(f"""
+            <div class="profile">
+                <div class="profile-name">{html.escape(nm)}</div>
+                <div class="profile-id">{html.escape(T["id_label"])}: {html.escape(str(shown_id))}</div>
+            </div>
+            """, unsafe_allow_html=True)
+            render_daily_target(daily_cards, DAILY[lang], lang)
+        elif d is None:
             st.error(T["not_found"])
         else:
             name = (d.get("rider_name") or "").strip() or T["rider"]
@@ -719,6 +888,7 @@ if page == "Rider Performance":
             """, unsafe_allow_html=True)
 
             render_segment_change(d, seg, T, CHANGE[lang])
+            render_daily_target(daily_cards, DAILY[lang], lang)
 
             st.markdown(f'<div class="section-title">{html.escape(T["overview"])}</div>',
                         unsafe_allow_html=True)
@@ -760,7 +930,7 @@ else:
         st.stop()
 
     st.title("⚙️ Performance Admin")
-    tab_upload, tab_data = st.tabs(["📥 Upload", "📊 Current Data"])
+    tab_upload, tab_data, tab_daily = st.tabs(["📥 Upload", "📊 Current Data", "📅 Daily Sheets"])
 
     with tab_upload:
         st.info("⚠️ أي رفع جديد هيمسح كل البيانات القديمة ويحط الملف الجديد مكانها.")
@@ -822,3 +992,6 @@ else:
                 mime="text/csv",
                 use_container_width=True,
             )
+
+    with tab_daily:
+        daily_admin_ui()
