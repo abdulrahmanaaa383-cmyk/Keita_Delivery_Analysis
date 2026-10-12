@@ -1,11 +1,8 @@
-import calendar
 import hmac
 import html
-import math
-import numbers
 import re
 import sqlite3
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -268,19 +265,17 @@ st.markdown("""
     .metric-value {color:#0f172a; font-size:25px; font-weight:800;}
     .section-title {font-size:20px; font-weight:800; margin:30px 0 14px;}
     .footer-note {text-align:center; color:#94a3b8; font-size:12px; margin-top:35px;}
-    .daily-card {border-radius:20px; padding:18px 20px; margin-top:18px; border:2px solid;}
-    .daily-card.ok {background:#f0fdf4; border-color:#16a34a; color:#14532d;}
-    .daily-card.bad {background:#fef2f2; border-color:#dc2626; color:#7f1d1d;}
-    .daily-card.none {background:#f8fafc; border-color:#cbd5e1; color:#475569;}
-    .dc-head {display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:15px;}
-    .dc-head b {font-size:17px;} .dc-head span {font-size:12px; opacity:.7; font-weight:700;}
-    .dc-status {font-size:22px; font-weight:800; margin:8px 0 12px;}
-    .dc-grid {display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:8px;}
-    .dc-stat {background:rgba(255,255,255,.75); border-radius:14px; padding:10px; text-align:center;}
-    .dc-stat b {display:block; font-size:22px; font-weight:800; color:#0f172a;}
-    .dc-stat small {font-size:11px; color:#64748b; font-weight:700;}
-    .dc-need {margin-top:12px; padding-top:10px; border-top:1px solid rgba(0,0,0,.12); font-size:15px; line-height:1.9; font-weight:600;}
-    .dc-need b {font-size:19px;}
+    .tg-card {border-radius:20px; padding:18px 20px; margin-top:18px; border:2px solid;}
+    .tg-card.ok {background:#f0fdf4; border-color:#16a34a; color:#14532d;}
+    .tg-card.bad {background:#fef2f2; border-color:#dc2626; color:#7f1d1d;}
+    .tg-title {font-size:14px; font-weight:700; opacity:.75;}
+    .tg-status {font-size:22px; font-weight:800; margin:4px 0 12px;}
+    .tg-grid {display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:8px;}
+    .tg-stat {background:rgba(255,255,255,.8); border-radius:14px; padding:10px; text-align:center;}
+    .tg-stat b {display:block; font-size:24px; font-weight:800; color:#0f172a;}
+    .tg-card.bad .tg-stat:last-child b {color:#dc2626;}
+    .tg-stat small {font-size:11px; color:#64748b; font-weight:700;}
+    .tg-line {margin-top:10px; font-size:13px; opacity:.8; font-weight:600;}
 
     .seg-change {border-radius:20px; padding:18px 22px; margin-top:18px; border:2px solid;}
     .seg-up {background:#f0fdf4; border-color:#16a34a; color:#14532d;}
@@ -679,425 +674,54 @@ def to_float_safe(v):
         return None
 
 
-
 # ============================================================
-# التارجت اليومي — قراءة شيتات هنجر / جاهز / شيفز (كله جوه الملف ده، مفيش ملفات تانية)
+# التارجت اليومي: بيقارن طلبات المندوب (من نفس الشيت) بالتارجت × عدد الأيام
 # ============================================================
-D_DB_PATH = Path(__file__).parent / "daily_tracker.db"
-D_PLATFORMS = {
-    "hunger": {"name": "هنجر ستيشن", "icon": "🟠", "target": 17},
-    "jahez": {"name": "جاهز", "icon": "🔴", "target": 7},
-    "chefz": {"name": "ذا شيفز", "icon": "🟣", "target": 7},
-}
-D_NAME_HEADERS = {"name", "ridername", "drivername", "couriername"}
-D_ID_KEYS = ("driverid", "riderid", "courierid")
-D_MONTHS = {m: i for i, m in enumerate(
-    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
-
-# ------------------------------------------------------------
-# Parsing
-# ------------------------------------------------------------
-def d_norm(text):
-    return re.sub(r"[\s_\-\.]+", "", str(text).strip().lower())
-
-
-def d_is_id_header(x):
-    n = d_norm(x)
-    return n == "id" or any(k in n for k in D_ID_KEYS)
-
-
-def d_parse_date_header(v, default_year):
-    """يفهم: 1-Oct / 01/10 / تاريخ حقيقي / رقم تاريخ Excel."""
-    try:
-        if v is None or pd.isna(v):
-            return None
-    except Exception:
-        pass
-    if isinstance(v, datetime):
-        return v.date()
-    if isinstance(v, date):
-        return v
-    if isinstance(v, numbers.Real) and not isinstance(v, bool):
-        if 40000 < float(v) < 60000:
-            return date(1899, 12, 30) + timedelta(days=int(v))
-        return None
-    if not isinstance(v, str):
-        return None
-
-    s = v.strip()
-    try:
-        m = re.match(r"^(\d{1,2})[\s\-/]([A-Za-z]{3,9})\.?(?:[\s\-/,]*(\d{2,4}))?$", s)
-        if m:
-            month = D_MONTHS.get(m.group(2)[:3].lower())
-            if month:
-                year = int(m.group(3)) if m.group(3) else default_year
-                year = year + 2000 if year < 100 else year
-                return date(year, month, int(m.group(1)))
-        m = re.match(r"^(\d{1,2})[/\.\-](\d{1,2})(?:[/\.\-](\d{2,4}))?$", s)
-        if m:  # dd/mm
-            year = int(m.group(3)) if m.group(3) else default_year
-            year = year + 2000 if year < 100 else year
-            return date(year, int(m.group(2)), int(m.group(1)))
-    except ValueError:
-        return None
-    return None
-
-
-def d_clean_id(v):
-    try:
-        if v is None or pd.isna(v):
-            return None
-    except Exception:
-        pass
-    if isinstance(v, float) and v.is_integer():
-        return str(int(v))
-    s = re.sub(r"\.0$", "", str(v).strip())
-    if s.lower() in ("", "nan", "none", "total", "grand total", "المجموع", "الإجمالي"):
-        return None
-    return s
-
-
-def d_clean_name(v):
-    try:
-        if v is None or pd.isna(v):
-            return ""
-    except Exception:
-        pass
-    s = str(v).strip()
-    return "" if s.lower() in ("nan", "#n/a", "n/a", "#na", "none") else s
-
-
-def d_parse_cell(v):
-    """('on', طلبات) / ('off', None) / (None, None) لو فاضية."""
-    try:
-        if v is None or pd.isna(v):
-            return None, None
-    except Exception:
-        pass
-    if isinstance(v, str):
-        s = v.strip().lower()
-        if s in ("off", "o", "leave", "اجازة", "إجازة"):
-            return "off", None
-        try:
-            return "on", int(float(s.replace(",", "")))
-        except ValueError:
-            return None, None
-    try:
-        return "on", int(float(v))
-    except Exception:
-        return None, None
-
-
-def d_describe(raw, n_rows=6, n_cols=9):
-    lines = []
-    for i in range(min(len(raw), n_rows)):
-        cells = " | ".join(str(x)[:16] for x in raw.iloc[i].tolist()[:n_cols])
-        lines.append(f"صف {i + 1}: {cells}")
-    return "\n".join(lines)
-
-
-def d_parse_sheet(raw, default_year, default_month=None):
-    raw = raw.reset_index(drop=True)
-
-    header_idx = None
-    for i in range(min(len(raw), 40)):
-        if any(d_is_id_header(x) for x in raw.iloc[i].tolist()):
-            header_idx = i
-            break
-    if header_idx is None:
-        raise ValueError("مش لاقي صف العناوين (لازم يكون فيه Rider ID أو DRIVER ID). أول الصفوف اللي شفتها:\n"
-                         + d_describe(raw, 8))
-
-    header = raw.iloc[header_idx].tolist()
-    id_col = next(j for j, v in enumerate(header) if d_is_id_header(v))
-    name_col = next((j for j, v in enumerate(header) if d_norm(v) in D_NAME_HEADERS), None)
-
-    date_cols = {}
-    for j, v in enumerate(header):
-        d = d_parse_date_header(v, default_year)
-        if d:
-            date_cols[j] = d
-
-    # لو العناوين أرقام أيام بس (1,2,3...) نستخدم الشهر والسنة المختارين
-    if not date_cols and default_month:
-        for j, v in enumerate(header):
-            if j <= id_col:
-                continue
-            try:
-                n = float(v)
-            except (TypeError, ValueError):
-                continue
-            if n == int(n) and 1 <= int(n) <= 31:
-                try:
-                    date_cols[j] = date(default_year, default_month, int(n))
-                except ValueError:
-                    pass
-        if len(date_cols) < 3:
-            date_cols = {}
-
-    if not date_cols:
-        cells = " | ".join(str(x)[:16] for x in header[:14])
-        raise ValueError("لقيت صف العناوين لكن مفيش أعمدة تواريخ مفهومة. عناوين الصف:\n" + cells)
-
-    rows = []
-    for k in range(header_idx + 1, len(raw)):
-        r = raw.iloc[k]
-        rid = d_clean_id(r.iloc[id_col])
-        if rid is None:
-            continue
-        name = d_clean_name(r.iloc[name_col]) if name_col is not None else ""
-        for j, d in date_cols.items():
-            status, orders = d_parse_cell(r.iloc[j])
-            if status is not None:
-                rows.append((rid, name, d, status, orders))
-
-    if not rows:
-        raise ValueError("لقيت العناوين لكن مفيش بيانات مناديب تحتها.")
-
-    df = pd.DataFrame(rows, columns=["rider_id", "rider_name", "date", "status", "orders"])
-    df = df.drop_duplicates(subset=["rider_id", "date"], keep="last").reset_index(drop=True)
-    df["month"] = df["date"].map(lambda d: d.strftime("%Y-%m"))
-    return df
-
-
-def d_read_best(up, year, month):
-    """يجرّب كل الشيتات في الملف ويرجّع اللي اتقرا صح + أخطاء الباقي."""
-    ok, errors = {}, {}
-    if up.name.lower().endswith(".csv"):
-        ok["CSV"] = d_parse_sheet(pd.read_csv(up, header=None), year, month)
-        return ok, errors
-    xl = pd.ExcelFile(up)
-    for sh in xl.sheet_names:
-        try:
-            ok[sh] = d_parse_sheet(pd.read_excel(xl, sheet_name=sh, header=None), year, month)
-        except Exception as e:
-            errors[sh] = str(e)
-    return ok, errors
-
-
-# ------------------------------------------------------------
-# Database
-# ------------------------------------------------------------
-def d_get_conn():
-    return sqlite3.connect(D_DB_PATH, check_same_thread=False)
-
-
-def d_init_db():
-    conn = d_get_conn()
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS daily (
-            platform TEXT NOT NULL, month TEXT NOT NULL, date TEXT NOT NULL,
-            rider_id TEXT NOT NULL, rider_name TEXT, status TEXT NOT NULL, orders INTEGER
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-
-def d_save_platform(platform, df):
-    """يمسح الشهور اللي في الملف بس لنفس المنصة ويحط الجديد."""
-    out = df.copy()
-    out["date"] = out["date"].map(lambda d: d.isoformat())
-    out["platform"] = platform
-    months = sorted(out["month"].unique())
-    conn = d_get_conn()
-    conn.executemany("DELETE FROM daily WHERE platform = ? AND month = ?",
-                     [(platform, m) for m in months])
-    out[["platform", "month", "date", "rider_id", "rider_name", "status", "orders"]].to_sql(
-        "daily", conn, if_exists="append", index=False)
-    conn.commit()
-    conn.close()
-    return months
-
-
-def d_list_months(platform):
-    conn = d_get_conn()
-    rows = conn.execute("SELECT DISTINCT month FROM daily WHERE platform = ? ORDER BY month DESC",
-                        (platform,)).fetchall()
-    conn.close()
-    return [r[0] for r in rows]
-
-
-def d_load_month(platform, month):
-    conn = d_get_conn()
-    df = pd.read_sql_query(
-        "SELECT rider_id, rider_name, date, status, orders FROM daily WHERE platform = ? AND month = ?",
-        conn, params=[platform, month])
-    conn.close()
-    df["date"] = pd.to_datetime(df["date"]).dt.date
-    return df
-
-
-
-# ============================================================
-# المتابعة اليومية للتارجت (من بيانات شيتات هنجر / جاهز / شيفز)
-# البيانات بتتخزن من تاب "Daily Sheets" في الأدمن
-# ============================================================
-PNAMES = {
-    "hunger": {"en": "HungerStation", "ar": "هنجر ستيشن", "ur": "ہنگر اسٹیشن", "bn": "হাঙ্গার স্টেশন"},
-    "jahez": {"en": "Jahez", "ar": "جاهز", "ur": "جاہز", "bn": "জাহেজ"},
-    "chefz": {"en": "The Chefz", "ar": "ذا شيفز", "ur": "دی شیفز", "bn": "দ্য শেফজ"},
-}
-
-DAILY = {
-    "en": {"title": "🎯 Your Daily Target", "total": "Your total orders", "avg": "Daily average",
-           "target": "Target / day", "days_hit": "Days you hit the target",
-           "ok": "✅ You are on track with the target", "bad": "⚠️ You are below the target",
-           "none": "No working days recorded yet",
-           "deficit": "You are {d} orders behind the target.",
-           "need": "To make it up, you need about {y} orders per day for the remaining {r} days (if you work every day).",
-           "ended": "There are no days left this month to make it up.",
-           "nodata": "No daily-target data for your ID yet."},
-    "ar": {"title": "🎯 التارجت اليومي بتاعك", "total": "إجمالي طلباتك", "avg": "متوسطك اليومي",
-           "target": "التارجت / يوم", "days_hit": "أيام حققت فيها التارجت",
-           "ok": "✅ أنت ماشي على التارجت", "bad": "⚠️ أنت أقل من التارجت",
-           "none": "لا توجد أيام عمل مسجّلة بعد",
-           "deficit": "ناقصك {d} طلب عشان توصل للتارجت.",
-           "need": "عشان تعوّض محتاج حوالي {y} طلب في اليوم في الأيام المتبقية ({r} يوم)، لو اشتغلت كل يوم.",
-           "ended": "مفيش أيام متبقية في الشهر للتعويض.",
-           "nodata": "لا توجد بيانات تارجت يومي لرقمك حتى الآن."},
-    "ur": {"title": "🎯 آپ کا یومیہ ٹارگٹ", "total": "آپ کے کل آرڈرز", "avg": "یومیہ اوسط",
-           "target": "ٹارگٹ / دن", "days_hit": "ٹارگٹ پورا کرنے والے دن",
-           "ok": "✅ آپ ٹارگٹ پر ہیں", "bad": "⚠️ آپ ٹارگٹ سے پیچھے ہیں",
-           "none": "ابھی تک کوئی کام کا دن ریکارڈ نہیں ہوا",
-           "deficit": "آپ ٹارگٹ سے {d} آرڈرز پیچھے ہیں۔",
-           "need": "اسے پورا کرنے کے لیے آپ کو باقی {r} دنوں میں روزانہ تقریباً {y} آرڈرز چاہئیں (اگر آپ ہر دن کام کریں)۔",
-           "ended": "اس مہینے میں پورا کرنے کے لیے کوئی دن باقی نہیں۔",
-           "nodata": "آپ کی آئی ڈی کے لیے ابھی تک یومیہ ٹارگٹ کا ڈیٹا موجود نہیں۔"},
-    "bn": {"title": "🎯 আপনার দৈনিক টার্গেট", "total": "আপনার মোট অর্ডার", "avg": "দৈনিক গড়",
-           "target": "টার্গেট / দিন", "days_hit": "টার্গেট পূরণের দিন",
-           "ok": "✅ আপনি টার্গেটের পথে আছেন", "bad": "⚠️ আপনি টার্গেটের চেয়ে পিছিয়ে আছেন",
-           "none": "এখনো কোনো কাজের দিন রেকর্ড হয়নি",
-           "deficit": "আপনি টার্গেটের চেয়ে {d}টি অর্ডার পিছিয়ে আছেন।",
-           "need": "এটি পূরণ করতে বাকি {r} দিনে প্রতিদিন প্রায় {y}টি অর্ডার দরকার (যদি প্রতিদিন কাজ করেন)।",
-           "ended": "এই মাসে পূরণ করার মতো কোনো দিন বাকি নেই।",
-           "nodata": "আপনার আইডির জন্য এখনো দৈনিক টার্গেটের কোনো তথ্য নেই।"},
+TARGETMSG = {
+    "en": {"title": "🎯 Daily Target", "ok": "✅ You are on track with the target",
+           "warn": "⚠️ Warning: you are below the target", "yours": "Your orders",
+           "required": "Required so far", "missing": "You are missing",
+           "line": "Target: {t} orders/day × {d} days = {e} orders"},
+    "ar": {"title": "🎯 التارجت اليومي", "ok": "✅ أنت ماشي على التارجت",
+           "warn": "⚠️ تنبيه: أنت أقل من التارجت", "yours": "طلباتك",
+           "required": "المطلوب لحد دلوقتي", "missing": "ناقصك",
+           "line": "التارجت {t} طلب/يوم × {d} يوم = {e} طلب"},
+    "ur": {"title": "🎯 یومیہ ٹارگٹ", "ok": "✅ آپ ٹارگٹ پر ہیں",
+           "warn": "⚠️ انتباہ: آپ ٹارگٹ سے پیچھے ہیں", "yours": "آپ کے آرڈرز",
+           "required": "اب تک مطلوب", "missing": "کم ہیں",
+           "line": "ٹارگٹ {t} آرڈر/دن × {d} دن = {e} آرڈرز"},
+    "bn": {"title": "🎯 দৈনিক টার্গেট", "ok": "✅ আপনি টার্গেটের পথে আছেন",
+           "warn": "⚠️ সতর্কতা: আপনি টার্গেটের চেয়ে পিছিয়ে আছেন", "yours": "আপনার অর্ডার",
+           "required": "এখন পর্যন্ত প্রয়োজন", "missing": "আপনার ঘাটতি",
+           "line": "টার্গেট {t} অর্ডার/দিন × {d} দিন = {e} অর্ডার"},
 }
 
 
-def get_daily_cards(rider_id):
-    """يرجّع كارت لكل منصة المندوب موجود فيها (آخر شهر محفوظ). لو حصل أي مشكلة بيرجّع [] ومفيش حاجة بتتكسر."""
+def render_target_status(d, M):
     try:
-        d_init_db()
-        cards = []
-        for key, cfg in D_PLATFORMS.items():
-            months = d_list_months(key)
-            if not months:
-                continue
-            month = months[0]
-            df = d_load_month(key, month)
-            mine = df[df["rider_id"] == rider_id]
-            if mine.empty:
-                continue
-
-            target = cfg["target"]
-            on = mine[mine["status"] == "on"]
-            days_worked = int(len(on))
-            total = int(on["orders"].fillna(0).sum())
-            days_hit = int((on["orders"] >= target).sum())
-            avg = total / days_worked if days_worked else 0.0
-
-            y, m = (int(x) for x in month.split("-"))
-            last = df["date"].max()
-            dim = calendar.monthrange(y, m)[1]
-            remaining = max(dim - last.day, 0) if (last.year, last.month) == (y, m) else 0
-
-            deficit = max(math.ceil(target * days_worked - total - 1e-9), 0)
-            need = math.ceil(target + deficit / remaining) if (deficit > 0 and remaining > 0) else None
-            name = next((n for n in mine["rider_name"] if n), "")
-
-            cards.append({
-                "key": key, "month": month, "name": name, "target": target, "total": total,
-                "days_worked": days_worked, "days_hit": days_hit, "avg": avg,
-                "on_track": days_worked > 0 and avg >= target,
-                "deficit": deficit, "remaining": remaining, "need": need,
-            })
-        return cards
+        t = int(d.get("target_per_day") or 0)
+        days = int(d.get("days_covered") or 0)
+        orders = int(d.get("orders") or 0)
     except Exception:
-        return []
-
-
-def render_daily_target(cards, D, lang):
-    if not cards:
-        st.markdown('<div class="daily-card none"><div class="dc-status" style="font-size:15px;margin:0">'
-                    + html.escape(D["nodata"]) + "</div></div>", unsafe_allow_html=True)
         return
-    for c in cards:
-        pname = PNAMES[c["key"]][lang]
-        if c["days_worked"] == 0:
-            cls, status = "none", D["none"]
-        elif c["on_track"]:
-            cls, status = "ok", D["ok"]
-        else:
-            cls, status = "bad", D["bad"]
-
-        extra = ""
-        if cls == "bad":
-            d_txt = D["deficit"].format(d="<b>" + str(c["deficit"]) + "</b>")
-            extra = '<div class="dc-need"><div>' + d_txt + "</div>"
-            if c["need"]:
-                n_txt = D["need"].format(y="<b>" + str(c["need"]) + "</b>", r=c["remaining"])
-                extra += "<div>" + n_txt + "</div>"
-            else:
-                extra += "<div>" + D["ended"] + "</div>"
-            extra += "</div>"
-
-        st.markdown(
-            f"""<div class="daily-card {cls}">
-<div class="dc-head"><b>{html.escape(D["title"])} · {html.escape(pname)}</b><span>{html.escape(c["month"])}</span></div>
-<div class="dc-status">{html.escape(status)}</div>
-<div class="dc-grid">
-<div class="dc-stat"><b>{c["total"]:,}</b><small>{html.escape(D["total"])}</small></div>
-<div class="dc-stat"><b>{c["avg"]:.1f}</b><small>{html.escape(D["avg"])}</small></div>
-<div class="dc-stat"><b>{c["target"]}</b><small>{html.escape(D["target"])}</small></div>
-<div class="dc-stat"><b>{c["days_hit"]} / {c["days_worked"]}</b><small>{html.escape(D["days_hit"])}</small></div>
-</div>{extra}</div>""",
-            unsafe_allow_html=True,
-        )
-
-
-def daily_upload_card(key, up, year, month):
-    try:
-        ok, errors = d_read_best(up, year, month)
-    except Exception as e:
-        st.error(f"مقدرتش أفتح الملف: {e}")
-        return
+    if t <= 0 or days <= 0:
+        return  # لسه ما اترفعش شيت بإعدادات التارجت
+    expected = t * days
+    missing = max(expected - orders, 0)
+    ok = missing == 0
+    stats = [(M["yours"], f"{orders:,}"), (M["required"], f"{expected:,}")]
     if not ok:
-        st.error("مقدرتش أفهم الملف.")
-        for sh, msg in errors.items():
-            with st.expander(f"الشيت: {sh}", expanded=len(errors) == 1):
-                st.code(msg)
-        return
-    sheet = next(iter(ok))
-    if len(ok) > 1:
-        sheet = st.selectbox("الشيت", list(ok.keys()), key=f"dsheet_{key}")
-    df = ok[sheet]
-    st.success(f"✔ {df['rider_id'].nunique():,} مندوب · {df['date'].nunique()} يوم "
-               f"({df['date'].min():%d-%b} ← {df['date'].max():%d-%b-%Y})")
-    if st.button("💾 حفظ / تحديث", type="primary", key=f"dsave_{key}"):
-        months = d_save_platform(key, df)
-        st.session_state["flash"] = f"✅ تم حفظ {D_PLATFORMS[key]['name']}: " + "، ".join(months)
-        st.rerun()
-
-
-def daily_admin_ui():
-    d_init_db()
-    flash = st.session_state.pop("flash", None)
-    if flash:
-        st.success(flash)
-    st.info("اختار المنصة، ارفع الشيت (فيه كل أيام الشهر) واضغط حفظ. الشهر اللي في الملف بس بيتحدّث.")
-    key = st.radio("المنصة", list(D_PLATFORMS.keys()), horizontal=True,
-                   format_func=lambda k: f"{D_PLATFORMS[k]['icon']} {D_PLATFORMS[k]['name']} (التارجت {D_PLATFORMS[k]['target']})")
-    saved = d_list_months(key)
-    st.caption("المحفوظ: " + ("، ".join(saved) if saved else "لا شيء"))
-    c1, c2 = st.columns(2)
-    year = c1.number_input("السنة", min_value=2020, max_value=2100, value=datetime.now().year, step=1)
-    month = c2.selectbox("الشهر (بيُستخدم بس لو الشيت بيكتب أرقام الأيام 1، 2، 3 من غير شهر)",
-                         list(range(1, 13)), index=datetime.now().month - 1)
-    up = st.file_uploader("ملف الشيت", type=["xlsx", "xls", "csv"], key=f"dfile_{key}")
-    if up:
-        daily_upload_card(key, up, int(year), int(month))
-
+        stats.append((M["missing"], f"{missing:,}"))
+    stats_html = "".join(f'<div class="tg-stat"><b>{v}</b><small>{html.escape(l)}</small></div>' for l, v in stats)
+    st.markdown(
+        f"""<div class="tg-card {'ok' if ok else 'bad'}">
+<div class="tg-title">{html.escape(M["title"])}</div>
+<div class="tg-status">{html.escape(M["ok"] if ok else M["warn"])}</div>
+<div class="tg-grid">{stats_html}</div>
+<div class="tg-line">{html.escape(M["line"].format(t=t, d=days, e=f"{expected:,}"))}</div>
+</div>""",
+        unsafe_allow_html=True,
+    )
 
 if page == "Rider Performance":
     lang_name = st.radio("Language", list(LANGS.keys()), horizontal=True,
@@ -1108,7 +732,7 @@ if page == "Rider Performance":
     if lang in RTL_LANGS:
         st.markdown("""
         <style>
-            .brand, .profile, .metric-card, .section-title, .footer-note, .tips, .seg-change, .daily-card,
+            .brand, .profile, .metric-card, .section-title, .footer-note, .tips, .seg-change, .tg-card,
             [data-testid="stForm"] {direction: rtl; text-align: right;}
             .brand {text-align: center;}
             .footer-note, .tips-closing {text-align: center;}
@@ -1139,17 +763,7 @@ if page == "Rider Performance":
 
     if shown_id:
         d = get_rider(shown_id)
-        daily_cards = get_daily_cards(shown_id)
-        if d is None and daily_cards:
-            nm = daily_cards[0]["name"] or T["rider"]
-            st.markdown(f"""
-            <div class="profile">
-                <div class="profile-name">{html.escape(nm)}</div>
-                <div class="profile-id">{html.escape(T["id_label"])}: {html.escape(str(shown_id))}</div>
-            </div>
-            """, unsafe_allow_html=True)
-            render_daily_target(daily_cards, DAILY[lang], lang)
-        elif d is None:
+        if d is None:
             st.error(T["not_found"])
         else:
             name = (d.get("rider_name") or "").strip() or T["rider"]
@@ -1167,7 +781,7 @@ if page == "Rider Performance":
             """, unsafe_allow_html=True)
 
             render_segment_change(d, seg, T, CHANGE[lang])
-            render_daily_target(daily_cards, DAILY[lang], lang)
+            render_target_status(d, TARGETMSG[lang])
 
             st.markdown(f'<div class="section-title">{html.escape(T["overview"])}</div>',
                         unsafe_allow_html=True)
@@ -1209,7 +823,7 @@ else:
         st.stop()
 
     st.title("⚙️ Performance Admin")
-    tab_upload, tab_data, tab_daily = st.tabs(["📥 Upload", "📊 Current Data", "📅 Daily Sheets"])
+    tab_upload, tab_data = st.tabs(["📥 Upload", "📊 Current Data"])
 
     with tab_upload:
         st.info("⚠️ أي رفع جديد هيمسح كل البيانات القديمة ويحط الملف الجديد مكانها.")
@@ -1248,6 +862,15 @@ else:
                 st.dataframe(clean.drop(columns=["uploaded_at"]).head(20),
                              use_container_width=True, hide_index=True)
 
+                st.markdown("##### 🎯 إعدادات التارجت")
+                g1, g2 = st.columns(2)
+                tgt = g1.number_input("التارجت اليومي (طلب/يوم)", min_value=1, value=17, step=1)
+                days = g2.number_input("عدد الأيام اللي الشيت مغطيها (من أول الشهر)", min_value=1,
+                                       max_value=31, value=max(datetime.now().day - 1, 1), step=1)
+                st.caption(f"المطلوب لحد دلوقتي من كل مندوب = {int(tgt)} × {int(days)} = {int(tgt) * int(days)} طلب")
+                clean["target_per_day"] = int(tgt)
+                clean["days_covered"] = int(days)
+
                 if st.button("💾 مسح القديم ورفع الجديد", type="primary", use_container_width=True):
                     with_prev = replace_all_data(clean)
                     st.success(
@@ -1271,6 +894,3 @@ else:
                 mime="text/csv",
                 use_container_width=True,
             )
-
-    with tab_daily:
-        daily_admin_ui()
