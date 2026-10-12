@@ -2,9 +2,10 @@ import calendar
 import hmac
 import html
 import math
+import numbers
 import re
 import sqlite3
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -678,9 +679,259 @@ def to_float_safe(v):
         return None
 
 
+
+# ============================================================
+# التارجت اليومي — قراءة شيتات هنجر / جاهز / شيفز (كله جوه الملف ده، مفيش ملفات تانية)
+# ============================================================
+D_DB_PATH = Path(__file__).parent / "daily_tracker.db"
+D_PLATFORMS = {
+    "hunger": {"name": "هنجر ستيشن", "icon": "🟠", "target": 17},
+    "jahez": {"name": "جاهز", "icon": "🔴", "target": 7},
+    "chefz": {"name": "ذا شيفز", "icon": "🟣", "target": 7},
+}
+D_NAME_HEADERS = {"name", "ridername", "drivername", "couriername"}
+D_ID_KEYS = ("driverid", "riderid", "courierid")
+D_MONTHS = {m: i for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+
+# ------------------------------------------------------------
+# Parsing
+# ------------------------------------------------------------
+def d_norm(text):
+    return re.sub(r"[\s_\-\.]+", "", str(text).strip().lower())
+
+
+def d_is_id_header(x):
+    n = d_norm(x)
+    return n == "id" or any(k in n for k in D_ID_KEYS)
+
+
+def d_parse_date_header(v, default_year):
+    """يفهم: 1-Oct / 01/10 / تاريخ حقيقي / رقم تاريخ Excel."""
+    try:
+        if v is None or pd.isna(v):
+            return None
+    except Exception:
+        pass
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, date):
+        return v
+    if isinstance(v, numbers.Real) and not isinstance(v, bool):
+        if 40000 < float(v) < 60000:
+            return date(1899, 12, 30) + timedelta(days=int(v))
+        return None
+    if not isinstance(v, str):
+        return None
+
+    s = v.strip()
+    try:
+        m = re.match(r"^(\d{1,2})[\s\-/]([A-Za-z]{3,9})\.?(?:[\s\-/,]*(\d{2,4}))?$", s)
+        if m:
+            month = D_MONTHS.get(m.group(2)[:3].lower())
+            if month:
+                year = int(m.group(3)) if m.group(3) else default_year
+                year = year + 2000 if year < 100 else year
+                return date(year, month, int(m.group(1)))
+        m = re.match(r"^(\d{1,2})[/\.\-](\d{1,2})(?:[/\.\-](\d{2,4}))?$", s)
+        if m:  # dd/mm
+            year = int(m.group(3)) if m.group(3) else default_year
+            year = year + 2000 if year < 100 else year
+            return date(year, int(m.group(2)), int(m.group(1)))
+    except ValueError:
+        return None
+    return None
+
+
+def d_clean_id(v):
+    try:
+        if v is None or pd.isna(v):
+            return None
+    except Exception:
+        pass
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    s = re.sub(r"\.0$", "", str(v).strip())
+    if s.lower() in ("", "nan", "none", "total", "grand total", "المجموع", "الإجمالي"):
+        return None
+    return s
+
+
+def d_clean_name(v):
+    try:
+        if v is None or pd.isna(v):
+            return ""
+    except Exception:
+        pass
+    s = str(v).strip()
+    return "" if s.lower() in ("nan", "#n/a", "n/a", "#na", "none") else s
+
+
+def d_parse_cell(v):
+    """('on', طلبات) / ('off', None) / (None, None) لو فاضية."""
+    try:
+        if v is None or pd.isna(v):
+            return None, None
+    except Exception:
+        pass
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("off", "o", "leave", "اجازة", "إجازة"):
+            return "off", None
+        try:
+            return "on", int(float(s.replace(",", "")))
+        except ValueError:
+            return None, None
+    try:
+        return "on", int(float(v))
+    except Exception:
+        return None, None
+
+
+def d_describe(raw, n_rows=6, n_cols=9):
+    lines = []
+    for i in range(min(len(raw), n_rows)):
+        cells = " | ".join(str(x)[:16] for x in raw.iloc[i].tolist()[:n_cols])
+        lines.append(f"صف {i + 1}: {cells}")
+    return "\n".join(lines)
+
+
+def d_parse_sheet(raw, default_year, default_month=None):
+    raw = raw.reset_index(drop=True)
+
+    header_idx = None
+    for i in range(min(len(raw), 40)):
+        if any(d_is_id_header(x) for x in raw.iloc[i].tolist()):
+            header_idx = i
+            break
+    if header_idx is None:
+        raise ValueError("مش لاقي صف العناوين (لازم يكون فيه Rider ID أو DRIVER ID). أول الصفوف اللي شفتها:\n"
+                         + d_describe(raw, 8))
+
+    header = raw.iloc[header_idx].tolist()
+    id_col = next(j for j, v in enumerate(header) if d_is_id_header(v))
+    name_col = next((j for j, v in enumerate(header) if d_norm(v) in D_NAME_HEADERS), None)
+
+    date_cols = {}
+    for j, v in enumerate(header):
+        d = d_parse_date_header(v, default_year)
+        if d:
+            date_cols[j] = d
+
+    # لو العناوين أرقام أيام بس (1,2,3...) نستخدم الشهر والسنة المختارين
+    if not date_cols and default_month:
+        for j, v in enumerate(header):
+            if j <= id_col:
+                continue
+            try:
+                n = float(v)
+            except (TypeError, ValueError):
+                continue
+            if n == int(n) and 1 <= int(n) <= 31:
+                try:
+                    date_cols[j] = date(default_year, default_month, int(n))
+                except ValueError:
+                    pass
+        if len(date_cols) < 3:
+            date_cols = {}
+
+    if not date_cols:
+        cells = " | ".join(str(x)[:16] for x in header[:14])
+        raise ValueError("لقيت صف العناوين لكن مفيش أعمدة تواريخ مفهومة. عناوين الصف:\n" + cells)
+
+    rows = []
+    for k in range(header_idx + 1, len(raw)):
+        r = raw.iloc[k]
+        rid = d_clean_id(r.iloc[id_col])
+        if rid is None:
+            continue
+        name = d_clean_name(r.iloc[name_col]) if name_col is not None else ""
+        for j, d in date_cols.items():
+            status, orders = d_parse_cell(r.iloc[j])
+            if status is not None:
+                rows.append((rid, name, d, status, orders))
+
+    if not rows:
+        raise ValueError("لقيت العناوين لكن مفيش بيانات مناديب تحتها.")
+
+    df = pd.DataFrame(rows, columns=["rider_id", "rider_name", "date", "status", "orders"])
+    df = df.drop_duplicates(subset=["rider_id", "date"], keep="last").reset_index(drop=True)
+    df["month"] = df["date"].map(lambda d: d.strftime("%Y-%m"))
+    return df
+
+
+def d_read_best(up, year, month):
+    """يجرّب كل الشيتات في الملف ويرجّع اللي اتقرا صح + أخطاء الباقي."""
+    ok, errors = {}, {}
+    if up.name.lower().endswith(".csv"):
+        ok["CSV"] = d_parse_sheet(pd.read_csv(up, header=None), year, month)
+        return ok, errors
+    xl = pd.ExcelFile(up)
+    for sh in xl.sheet_names:
+        try:
+            ok[sh] = d_parse_sheet(pd.read_excel(xl, sheet_name=sh, header=None), year, month)
+        except Exception as e:
+            errors[sh] = str(e)
+    return ok, errors
+
+
+# ------------------------------------------------------------
+# Database
+# ------------------------------------------------------------
+def d_get_conn():
+    return sqlite3.connect(D_DB_PATH, check_same_thread=False)
+
+
+def d_init_db():
+    conn = d_get_conn()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS daily (
+            platform TEXT NOT NULL, month TEXT NOT NULL, date TEXT NOT NULL,
+            rider_id TEXT NOT NULL, rider_name TEXT, status TEXT NOT NULL, orders INTEGER
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def d_save_platform(platform, df):
+    """يمسح الشهور اللي في الملف بس لنفس المنصة ويحط الجديد."""
+    out = df.copy()
+    out["date"] = out["date"].map(lambda d: d.isoformat())
+    out["platform"] = platform
+    months = sorted(out["month"].unique())
+    conn = d_get_conn()
+    conn.executemany("DELETE FROM daily WHERE platform = ? AND month = ?",
+                     [(platform, m) for m in months])
+    out[["platform", "month", "date", "rider_id", "rider_name", "status", "orders"]].to_sql(
+        "daily", conn, if_exists="append", index=False)
+    conn.commit()
+    conn.close()
+    return months
+
+
+def d_list_months(platform):
+    conn = d_get_conn()
+    rows = conn.execute("SELECT DISTINCT month FROM daily WHERE platform = ? ORDER BY month DESC",
+                        (platform,)).fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+
+def d_load_month(platform, month):
+    conn = d_get_conn()
+    df = pd.read_sql_query(
+        "SELECT rider_id, rider_name, date, status, orders FROM daily WHERE platform = ? AND month = ?",
+        conn, params=[platform, month])
+    conn.close()
+    df["date"] = pd.to_datetime(df["date"]).dt.date
+    return df
+
+
+
 # ============================================================
 # المتابعة اليومية للتارجت (من بيانات شيتات هنجر / جاهز / شيفز)
-# البيانات بتتخزن من تاب "Daily Sheets" في الأدمن (نفس مكتبة tracker.py)
+# البيانات بتتخزن من تاب "Daily Sheets" في الأدمن
 # ============================================================
 PNAMES = {
     "hunger": {"en": "HungerStation", "ar": "هنجر ستيشن", "ur": "ہنگر اسٹیشن", "bn": "হাঙ্গার স্টেশন"},
@@ -727,15 +978,14 @@ DAILY = {
 def get_daily_cards(rider_id):
     """يرجّع كارت لكل منصة المندوب موجود فيها (آخر شهر محفوظ). لو حصل أي مشكلة بيرجّع [] ومفيش حاجة بتتكسر."""
     try:
-        import tracker as TR
-        TR.init_db()
+        d_init_db()
         cards = []
-        for key, cfg in TR.PLATFORMS.items():
-            months = TR.list_months(key)
+        for key, cfg in D_PLATFORMS.items():
+            months = d_list_months(key)
             if not months:
                 continue
             month = months[0]
-            df = TR.load_month(key, month)
+            df = d_load_month(key, month)
             mine = df[df["rider_id"] == rider_id]
             if mine.empty:
                 continue
@@ -806,27 +1056,48 @@ def render_daily_target(cards, D, lang):
         )
 
 
+def daily_upload_card(key, up, year, month):
+    try:
+        ok, errors = d_read_best(up, year, month)
+    except Exception as e:
+        st.error(f"مقدرتش أفتح الملف: {e}")
+        return
+    if not ok:
+        st.error("مقدرتش أفهم الملف.")
+        for sh, msg in errors.items():
+            with st.expander(f"الشيت: {sh}", expanded=len(errors) == 1):
+                st.code(msg)
+        return
+    sheet = next(iter(ok))
+    if len(ok) > 1:
+        sheet = st.selectbox("الشيت", list(ok.keys()), key=f"dsheet_{key}")
+    df = ok[sheet]
+    st.success(f"✔ {df['rider_id'].nunique():,} مندوب · {df['date'].nunique()} يوم "
+               f"({df['date'].min():%d-%b} ← {df['date'].max():%d-%b-%Y})")
+    if st.button("💾 حفظ / تحديث", type="primary", key=f"dsave_{key}"):
+        months = d_save_platform(key, df)
+        st.session_state["flash"] = f"✅ تم حفظ {D_PLATFORMS[key]['name']}: " + "، ".join(months)
+        st.rerun()
+
+
 def daily_admin_ui():
-    """تاب الأدمن لرفع شيتات هنجر / جاهز / شيفز اليومية (بنفس قارئ tracker.py)."""
-    import tracker as TR
-    TR.init_db()
+    d_init_db()
     flash = st.session_state.pop("flash", None)
     if flash:
         st.success(flash)
-    st.info("ارفع شيت كل منصة (المجمّع بكل أيام الشهر). الشهر اللي في الملف بس بيتحدّث، والشهور القديمة بتفضل.")
+    st.info("اختار المنصة، ارفع الشيت (فيه كل أيام الشهر) واضغط حفظ. الشهر اللي في الملف بس بيتحدّث.")
+    key = st.radio("المنصة", list(D_PLATFORMS.keys()), horizontal=True,
+                   format_func=lambda k: f"{D_PLATFORMS[k]['icon']} {D_PLATFORMS[k]['name']} (التارجت {D_PLATFORMS[k]['target']})")
+    saved = d_list_months(key)
+    st.caption("المحفوظ: " + ("، ".join(saved) if saved else "لا شيء"))
     c1, c2 = st.columns(2)
     year = c1.number_input("السنة", min_value=2020, max_value=2100, value=datetime.now().year, step=1)
     month = c2.selectbox("الشهر (بيُستخدم بس لو الشيت بيكتب أرقام الأيام 1، 2، 3 من غير شهر)",
                          list(range(1, 13)), index=datetime.now().month - 1)
-    for key, cfg in TR.PLATFORMS.items():
-        st.markdown(f"#### {cfg['icon']} {cfg['name']} — التارجت {cfg['target']} طلب/يوم")
-        saved = TR.list_months(key)
-        st.caption("المحفوظ: " + ("، ".join(saved) if saved else "لا شيء"))
-        up = st.file_uploader("الملف", type=["xlsx", "xls", "csv"], key=f"dfile_{key}",
-                              label_visibility="collapsed")
-        if up:
-            TR.upload_card(key, up, int(year), int(month))
-        st.divider()
+    up = st.file_uploader("ملف الشيت", type=["xlsx", "xls", "csv"], key=f"dfile_{key}")
+    if up:
+        daily_upload_card(key, up, int(year), int(month))
+
 
 if page == "Rider Performance":
     lang_name = st.radio("Language", list(LANGS.keys()), horizontal=True,
