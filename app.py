@@ -2,7 +2,7 @@ import hmac
 import html
 import re
 import sqlite3
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -265,6 +265,30 @@ st.markdown("""
     .metric-value {color:#0f172a; font-size:25px; font-weight:800;}
     .section-title {font-size:20px; font-weight:800; margin:30px 0 14px;}
     .footer-note {text-align:center; color:#94a3b8; font-size:12px; margin-top:35px;}
+    .rq-hero {background:linear-gradient(135deg,#0f172a,#1e293b); color:#fff; border-radius:22px; padding:22px 24px; margin:18px 0 14px;
+              box-shadow:0 12px 36px rgba(15,23,42,.18);}
+    .rq-hero-t {font-size:24px; font-weight:800;} .rq-hero-s {color:#cbd5e1; font-size:14px; margin-top:4px;}
+    .rq-form-title {font-size:18px; font-weight:800; color:#0f172a; padding-bottom:8px; margin-bottom:6px; border-bottom:3px solid var(--c);}
+    .rq-card {background:#fff; border:1px solid #e5e7eb; border-radius:18px; padding:14px 16px; margin-bottom:10px;
+              box-shadow:0 6px 18px rgba(15,23,42,.05); border-inline-start:6px solid var(--c);}
+    .rq-head {display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;}
+    .rq-kind {font-weight:800; color:#0f172a; font-size:15px;}
+    .rq-badge {background:color-mix(in srgb, var(--b) 14%, white); color:var(--b); border:1px solid color-mix(in srgb, var(--b) 40%, white);
+               border-radius:999px; padding:4px 12px; font-size:12px; font-weight:800;}
+    .rq-who {margin-top:8px; display:flex; gap:10px; align-items:baseline; flex-wrap:wrap;}
+    .rq-who b {font-size:17px; color:#0f172a;} .rq-who span {background:#0f172a; color:#fff; border-radius:8px; padding:2px 9px; font-size:12px; font-weight:700;}
+    .rq-detail {margin-top:8px; font-size:17px; font-weight:700; color:#0f172a;}
+    .rq-note {margin-top:6px; color:#475569; font-size:13px;}
+    .rq-anote {margin-top:8px; background:#f1f5f9; border-radius:12px; padding:8px 12px; font-size:13px; color:#334155;}
+    .rq-meta {margin-top:8px; font-size:11px; color:#94a3b8; font-weight:600;}
+    .rq-empty {text-align:center; color:#94a3b8; padding:22px; background:#f8fafc; border:1px dashed #cbd5e1; border-radius:16px;}
+    .rq-admin {direction:rtl; text-align:right;}
+    .rq-kpis {display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; margin-bottom:18px; direction:rtl;}
+    .rq-kpi {background:#fff; border:1px solid #eceff7; border-radius:18px; padding:14px 18px; border-right:6px solid var(--c);
+             box-shadow:0 6px 18px rgba(15,23,42,.05); text-align:right;}
+    .rq-kpi-l {color:#64748b; font-weight:700; font-size:13px;} .rq-kpi-v {font-size:34px; font-weight:800; color:#0f172a; line-height:1.15;}
+    .rq-kpi-s {color:#94a3b8; font-size:12px; font-weight:600;}
+
     .tg-card {border-radius:20px; padding:18px 20px; margin-top:18px; border:2px solid;}
     .tg-card.ok {background:#f0fdf4; border-color:#16a34a; color:#14532d;}
     .tg-card.bad {background:#fef2f2; border-color:#dc2626; color:#7f1d1d;}
@@ -723,6 +747,331 @@ def render_target_status(d, M):
         unsafe_allow_html=True,
     )
 
+
+# ============================================================
+# 📨 نظام الطلبات: إنترنت / سلفة / إجازة
+# المندوب يبعت من صفحته، والأدمن يشوفها ويوافق أو يرفض من تاب Requests
+# ============================================================
+KINDS = ["internet", "advance", "leave"]
+KIND_ICON = {"internet": "🌐", "advance": "💵", "leave": "🌴"}
+KIND_COLOR = {"internet": "#0ea5e9", "advance": "#8b5cf6", "leave": "#14b8a6"}
+STATUS_COLOR = {"pending": "#f59e0b", "approved": "#16a34a", "rejected": "#dc2626"}
+KSA_TZ = timezone(timedelta(hours=3))
+
+REQ = {
+    "en": {
+        "tab_perf": "📊 My Performance", "tab_req": "📨 My Requests",
+        "title": "Requests", "sub": "Send a request to the management and track its status",
+        "k_internet": "🌐 Internet", "k_advance": "💵 Advance", "k_leave": "🌴 Leave",
+        "h_internet": "Internet request", "h_advance": "Advance request", "h_leave": "Leave request",
+        "f_phone": "Mobile number", "f_phone_ph": "05xxxxxxxx", "f_note": "Notes (optional)",
+        "f_amount": "Amount (SAR)", "f_from": "From", "f_to": "To", "submit": "Send request",
+        "ok": "✅ Your request was sent (No. {n}). The management will review it.",
+        "err_phone": "Please enter a valid mobile number.", "err_amount": "Please enter the amount.",
+        "err_dates": "The end date must be the same day or after the start date.",
+        "dup": "You already have a pending request of this type.",
+        "my_title": "Your requests", "none": "You have no requests yet.",
+        "pending": "⏳ Pending", "approved": "✅ Approved", "rejected": "❌ Rejected",
+        "admin_note": "Management note", "days": "days", "sar": "SAR",
+        "names": {"internet": "Internet request", "advance": "Advance request", "leave": "Leave request"},
+    },
+    "ar": {
+        "tab_perf": "📊 أدائي", "tab_req": "📨 طلباتي",
+        "title": "الطلبات", "sub": "ابعت طلبك للإدارة وتابع حالته",
+        "k_internet": "🌐 إنترنت", "k_advance": "💵 سلفة", "k_leave": "🌴 إجازة",
+        "h_internet": "طلب إنترنت", "h_advance": "طلب سلفة", "h_leave": "طلب إجازة",
+        "f_phone": "رقم الجوال", "f_phone_ph": "05xxxxxxxx", "f_note": "ملاحظات (اختياري)",
+        "f_amount": "المبلغ (ريال)", "f_from": "من", "f_to": "إلى", "submit": "إرسال الطلب",
+        "ok": "✅ تم إرسال طلبك (رقم {n}). الإدارة هتراجعه.",
+        "err_phone": "من فضلك اكتب رقم جوال صحيح.", "err_amount": "من فضلك اكتب المبلغ.",
+        "err_dates": "تاريخ النهاية لازم يكون نفس يوم البداية أو بعده.",
+        "dup": "عندك طلب من النوع ده قيد المراجعة بالفعل.",
+        "my_title": "طلباتك", "none": "مفيش طلبات لسه.",
+        "pending": "⏳ قيد المراجعة", "approved": "✅ تمت الموافقة", "rejected": "❌ مرفوض",
+        "admin_note": "ملاحظة الإدارة", "days": "يوم", "sar": "ريال",
+        "names": {"internet": "طلب إنترنت", "advance": "طلب سلفة", "leave": "طلب إجازة"},
+    },
+    "ur": {
+        "tab_perf": "📊 میری کارکردگی", "tab_req": "📨 میری درخواستیں",
+        "title": "درخواستیں", "sub": "انتظامیہ کو درخواست بھیجیں اور اس کی حالت دیکھیں",
+        "k_internet": "🌐 انٹرنیٹ", "k_advance": "💵 ایڈوانس", "k_leave": "🌴 چھٹی",
+        "h_internet": "انٹرنیٹ کی درخواست", "h_advance": "ایڈوانس کی درخواست", "h_leave": "چھٹی کی درخواست",
+        "f_phone": "موبائل نمبر", "f_phone_ph": "05xxxxxxxx", "f_note": "نوٹس (اختیاری)",
+        "f_amount": "رقم (ریال)", "f_from": "سے", "f_to": "تک", "submit": "درخواست بھیجیں",
+        "ok": "✅ آپ کی درخواست بھیج دی گئی (نمبر {n})۔ انتظامیہ جائزہ لے گی۔",
+        "err_phone": "براہ کرم درست موبائل نمبر درج کریں۔", "err_amount": "براہ کرم رقم درج کریں۔",
+        "err_dates": "آخری تاریخ شروع کے دن یا اس کے بعد ہونی چاہیے۔",
+        "dup": "اس قسم کی ایک درخواست پہلے سے زیر جائزہ ہے۔",
+        "my_title": "آپ کی درخواستیں", "none": "ابھی تک کوئی درخواست نہیں۔",
+        "pending": "⏳ زیر جائزہ", "approved": "✅ منظور", "rejected": "❌ مسترد",
+        "admin_note": "انتظامیہ کا نوٹ", "days": "دن", "sar": "ریال",
+        "names": {"internet": "انٹرنیٹ کی درخواست", "advance": "ایڈوانس کی درخواست", "leave": "چھٹی کی درخواست"},
+    },
+    "bn": {
+        "tab_perf": "📊 আমার পারফরম্যান্স", "tab_req": "📨 আমার অনুরোধ",
+        "title": "অনুরোধ", "sub": "ম্যানেজমেন্টকে অনুরোধ পাঠান এবং অবস্থা দেখুন",
+        "k_internet": "🌐 ইন্টারনেট", "k_advance": "💵 অগ্রিম", "k_leave": "🌴 ছুটি",
+        "h_internet": "ইন্টারনেটের অনুরোধ", "h_advance": "অগ্রিমের অনুরোধ", "h_leave": "ছুটির অনুরোধ",
+        "f_phone": "মোবাইল নম্বর", "f_phone_ph": "05xxxxxxxx", "f_note": "নোট (ঐচ্ছিক)",
+        "f_amount": "পরিমাণ (রিয়াল)", "f_from": "শুরু", "f_to": "শেষ", "submit": "অনুরোধ পাঠান",
+        "ok": "✅ আপনার অনুরোধ পাঠানো হয়েছে (নম্বর {n})। ম্যানেজমেন্ট পর্যালোচনা করবে।",
+        "err_phone": "অনুগ্রহ করে সঠিক মোবাইল নম্বর দিন।", "err_amount": "অনুগ্রহ করে পরিমাণ লিখুন।",
+        "err_dates": "শেষ তারিখ শুরুর দিনে বা তার পরে হতে হবে।",
+        "dup": "এই ধরনের একটি অনুরোধ ইতিমধ্যে পর্যালোচনাধীন আছে।",
+        "my_title": "আপনার অনুরোধসমূহ", "none": "এখনো কোনো অনুরোধ নেই।",
+        "pending": "⏳ পর্যালোচনাধীন", "approved": "✅ অনুমোদিত", "rejected": "❌ প্রত্যাখ্যাত",
+        "admin_note": "ম্যানেজমেন্টের নোট", "days": "দিন", "sar": "রিয়াল",
+        "names": {"internet": "ইন্টারনেটের অনুরোধ", "advance": "অগ্রিমের অনুরোধ", "leave": "ছুটির অনুরোধ"},
+    },
+}
+
+# نصوص الأدمن (عربي)
+AR_ADMIN = {
+    "kind": {"internet": "🌐 طلب إنترنت", "advance": "💵 طلب سلفة", "leave": "🌴 طلب إجازة"},
+    "status": {"pending": "⏳ قيد المراجعة", "approved": "✅ تمت الموافقة", "rejected": "❌ مرفوض"},
+    "labels": {"sar": "ريال", "days": "يوم", "admin_note": "ملاحظة الإدارة"},
+}
+
+
+def init_requests_db():
+    conn = get_conn()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rider_id TEXT NOT NULL, rider_name TEXT, kind TEXT NOT NULL,
+            amount REAL, phone TEXT, date_from TEXT, date_to TEXT, note TEXT,
+            status TEXT NOT NULL DEFAULT 'pending', admin_note TEXT,
+            created_at TEXT NOT NULL, updated_at TEXT, lang TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def now_ksa():
+    return datetime.now(KSA_TZ).strftime("%Y-%m-%d %H:%M")
+
+
+def add_request(rider_id, rider_name, kind, amount=None, phone=None, date_from=None, date_to=None, note="", lang="en"):
+    init_requests_db()
+    conn = get_conn()
+    cur = conn.execute(
+        """INSERT INTO requests (rider_id, rider_name, kind, amount, phone, date_from, date_to, note,
+                                 status, created_at, updated_at, lang)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)""",
+        (str(rider_id), rider_name, kind, amount, phone, date_from, date_to, note, now_ksa(), now_ksa(), lang))
+    conn.commit()
+    new_id = cur.lastrowid
+    conn.close()
+    return new_id
+
+
+def list_requests(rider_id=None, status=None, kind=None, limit=500):
+    init_requests_db()
+    q, params = "SELECT * FROM requests WHERE 1=1", []
+    if rider_id:
+        q += " AND rider_id = ?"
+        params.append(str(rider_id))
+    if status:
+        q += " AND status = ?"
+        params.append(status)
+    if kind:
+        q += " AND kind = ?"
+        params.append(kind)
+    q += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+    conn = get_conn()
+    conn.row_factory = sqlite3.Row
+    rows = [dict(r) for r in conn.execute(q, params).fetchall()]
+    conn.close()
+    return rows
+
+
+def update_request(req_id, status, admin_note):
+    conn = get_conn()
+    conn.execute("UPDATE requests SET status = ?, admin_note = ?, updated_at = ? WHERE id = ?",
+                 (status, admin_note.strip(), now_ksa(), int(req_id)))
+    conn.commit()
+    conn.close()
+
+
+def count_requests(status="pending"):
+    try:
+        init_requests_db()
+        conn = get_conn()
+        n = conn.execute("SELECT COUNT(*) FROM requests WHERE status = ?", (status,)).fetchone()[0]
+        conn.close()
+        return int(n)
+    except Exception:
+        return 0
+
+
+def has_pending(rider_id, kind):
+    return bool(list_requests(rider_id=rider_id, status="pending", kind=kind, limit=1))
+
+
+def detail_text(r, labels):
+    if r["kind"] == "internet":
+        return "📱 " + (r.get("phone") or "—")
+    if r["kind"] == "advance":
+        return "💰 " + f"{(r.get('amount') or 0):,.0f} " + labels["sar"]
+    try:
+        n = (date.fromisoformat(r["date_to"]) - date.fromisoformat(r["date_from"])).days + 1
+    except Exception:
+        n = 1
+    return "📅 " + str(r["date_from"]) + " → " + str(r["date_to"]) + "  (" + str(n) + " " + labels["days"] + ")"
+
+
+def request_card(r, kind_label, status_label, labels, admin=False):
+    e = html.escape
+    color = KIND_COLOR.get(r["kind"], "#64748b")
+    bcolor = STATUS_COLOR.get(r["status"], "#64748b")
+    who = ""
+    if admin:
+        who = ('<div class="rq-who"><b>' + e(r.get("rider_name") or "—") + '</b><span>ID ' + e(str(r["rider_id"])) + "</span></div>")
+    note = ""
+    if r.get("note"):
+        note = '<div class="rq-note">📝 ' + e(r["note"]) + "</div>"
+    anote = ""
+    if r.get("admin_note"):
+        anote = '<div class="rq-anote"><b>' + e(labels["admin_note"]) + ":</b> " + e(r["admin_note"]) + "</div>"
+    cls = "rq-card rq-admin" if admin else "rq-card"
+    return (
+        '<div class="' + cls + '" style="--c:' + color + '">'
+        '<div class="rq-head"><span class="rq-kind">' + e(kind_label) + '</span>'
+        '<span class="rq-badge" style="--b:' + bcolor + '">' + e(status_label) + "</span></div>"
+        + who + '<div class="rq-detail">' + e(detail_text(r, labels)) + "</div>" + note + anote +
+        '<div class="rq-meta">#' + str(r["id"]) + " · " + e(r["created_at"]) + "</div></div>"
+    )
+
+
+def rider_request_count(rider_id):
+    try:
+        return len(list_requests(rider_id=str(rider_id), limit=200))
+    except Exception:
+        return 0
+
+
+def render_requests_page(d, lang):
+    R = REQ[lang]
+    e = html.escape
+    rid = str(d["rider_id"])
+    name = (d.get("rider_name") or "").strip()
+
+    st.markdown('<div class="rq-hero"><div class="rq-hero-t">📨 ' + e(R["title"]) + '</div><div class="rq-hero-s">'
+                + e(R["sub"]) + "</div></div>", unsafe_allow_html=True)
+
+    kind = st.session_state.get("req_kind", "internet")
+    for col, k in zip(st.columns(3), KINDS):
+        if col.button(R["k_" + k], key="rk_" + k, type="primary" if kind == k else "secondary",
+                      use_container_width=True):
+            st.session_state["req_kind"] = k
+            st.rerun()
+
+    with st.form("req_form_" + kind, clear_on_submit=True):
+        st.markdown('<div class="rq-form-title" style="--c:' + KIND_COLOR[kind] + '">' + e(R["h_" + kind]) + "</div>",
+                    unsafe_allow_html=True)
+        phone, amount, d_from, d_to = "", 0, None, None
+        if kind == "internet":
+            phone = st.text_input(R["f_phone"], placeholder=R["f_phone_ph"], key="rq_phone", max_chars=20)
+        elif kind == "advance":
+            amount = st.number_input(R["f_amount"], min_value=0, max_value=100000, value=0, step=50, key="rq_amount")
+        else:
+            c1, c2 = st.columns(2)
+            d_from = c1.date_input(R["f_from"], value=date.today(), min_value=date.today(), key="rq_from")
+            d_to = c2.date_input(R["f_to"], value=date.today(), min_value=date.today(), key="rq_to")
+        note = st.text_area(R["f_note"], height=80, max_chars=300, key="rq_note")
+        sent = st.form_submit_button(R["submit"], type="primary", use_container_width=True)
+
+    if sent:
+        digits = re.sub(r"\D", "", phone or "")
+        if kind == "internet" and not (8 <= len(digits) <= 15):
+            st.error(R["err_phone"])
+        elif kind == "advance" and not amount:
+            st.error(R["err_amount"])
+        elif kind == "leave" and d_to < d_from:
+            st.error(R["err_dates"])
+        elif has_pending(rid, kind):
+            st.warning(R["dup"])
+        else:
+            new_id = add_request(
+                rid, name, kind,
+                amount=float(amount) if kind == "advance" else None,
+                phone=(phone or "").strip() if kind == "internet" else None,
+                date_from=d_from.isoformat() if d_from else None,
+                date_to=d_to.isoformat() if d_to else None,
+                note=(note or "").strip(), lang=lang)
+            st.success(R["ok"].format(n=new_id))
+
+    st.markdown('<div class="section-title">' + e(R["my_title"]) + "</div>", unsafe_allow_html=True)
+    mine = list_requests(rider_id=rid, limit=50)
+    if not mine:
+        st.markdown('<div class="rq-empty">' + e(R["none"]) + "</div>", unsafe_allow_html=True)
+    labels = {"sar": R["sar"], "days": R["days"], "admin_note": R["admin_note"]}
+    for r in mine:
+        st.markdown(request_card(r, R["names"][r["kind"]], R[r["status"]], labels), unsafe_allow_html=True)
+
+
+def admin_requests_ui():
+    e = html.escape
+    rows = list_requests(limit=1000)
+    pend = [r for r in rows if r["status"] == "pending"]
+    by = lambda k: [r for r in pend if r["kind"] == k]
+    adv_sum = sum((r.get("amount") or 0) for r in by("advance"))
+
+    def kpi(label, value, sub, color):
+        return ('<div class="rq-kpi" style="--c:' + color + '"><div class="rq-kpi-l">' + e(label) + '</div><div class="rq-kpi-v">'
+                + str(value) + '</div><div class="rq-kpi-s">' + e(sub) + "</div></div>")
+
+    st.markdown(
+        '<div class="rq-kpis">'
+        + kpi("⏳ طلبات قيد المراجعة", len(pend), "كل الأنواع", "#f59e0b")
+        + kpi("🌐 إنترنت", len(by("internet")), "قيد المراجعة", KIND_COLOR["internet"])
+        + kpi("💵 سلف", len(by("advance")), "إجمالي " + f"{adv_sum:,.0f}" + " ريال", KIND_COLOR["advance"])
+        + kpi("🌴 إجازات", len(by("leave")), "قيد المراجعة", KIND_COLOR["leave"])
+        + "</div>", unsafe_allow_html=True)
+
+    f1, f2, f3 = st.columns([2, 2, 2])
+    status_opts = {"⏳ قيد المراجعة": "pending", "✅ تمت الموافقة": "approved", "❌ مرفوضة": "rejected", "الكل": None}
+    status_pick = f1.selectbox("الحالة", list(status_opts.keys()), key="rqa_status")
+    kind_opts = {"الكل": None, "🌐 إنترنت": "internet", "💵 سلفة": "advance", "🌴 إجازة": "leave"}
+    kind_pick = f2.selectbox("النوع", list(kind_opts.keys()), key="rqa_kind")
+    q = f3.text_input("بحث بالـ ID أو الاسم", key="rqa_q").strip().lower()
+
+    shown = [r for r in rows
+             if (status_opts[status_pick] is None or r["status"] == status_opts[status_pick])
+             and (kind_opts[kind_pick] is None or r["kind"] == kind_opts[kind_pick])
+             and (not q or q in str(r["rider_id"]).lower() or q in (r.get("rider_name") or "").lower())]
+
+    if not shown:
+        st.markdown('<div class="rq-empty">مفيش طلبات بالفلتر ده 🎉</div>', unsafe_allow_html=True)
+
+    for r in shown[:40]:
+        st.markdown(request_card(r, AR_ADMIN["kind"][r["kind"]], AR_ADMIN["status"][r["status"]],
+                                 AR_ADMIN["labels"], admin=True), unsafe_allow_html=True)
+        n_col, a_col, r_col, o_col = st.columns([5, 1.3, 1.3, 1.1])
+        note = n_col.text_input("ملاحظة للمندوب (اختياري)", value=r.get("admin_note") or "",
+                                key="rqn_" + str(r["id"]), label_visibility="collapsed",
+                                placeholder="ملاحظة للمندوب (اختياري)")
+        if a_col.button("✅ موافقة", key="rqa_ok_" + str(r["id"]), use_container_width=True):
+            update_request(r["id"], "approved", note)
+            st.rerun()
+        if r_col.button("❌ رفض", key="rqa_no_" + str(r["id"]), use_container_width=True):
+            update_request(r["id"], "rejected", note)
+            st.rerun()
+        if r["status"] != "pending" and o_col.button("↩", key="rqa_re_" + str(r["id"]), use_container_width=True,
+                                                      help="رجّع الطلب لقيد المراجعة"):
+            update_request(r["id"], "pending", note)
+            st.rerun()
+    if len(shown) > 40:
+        st.caption("معروض أحدث 40 طلب من " + str(len(shown)) + " — استخدم الفلتر لتضييق النتائج.")
+
+    if rows:
+        out = pd.DataFrame(rows)[["id", "created_at", "rider_id", "rider_name", "kind", "status", "amount",
+                                  "phone", "date_from", "date_to", "note", "admin_note"]]
+        st.download_button("📥 تحميل كل الطلبات CSV", out.to_csv(index=False).encode("utf-8-sig"),
+                           file_name="requests.csv", mime="text/csv", key="rqa_dl")
+
 if page == "Rider Performance":
     lang_name = st.radio("Language", list(LANGS.keys()), horizontal=True,
                          key="lang", label_visibility="collapsed")
@@ -732,7 +1081,7 @@ if page == "Rider Performance":
     if lang in RTL_LANGS:
         st.markdown("""
         <style>
-            .brand, .profile, .metric-card, .section-title, .footer-note, .tips, .seg-change, .tg-card,
+            .brand, .profile, .metric-card, .section-title, .footer-note, .tips, .seg-change, .tg-card, .rq-hero, .rq-card, .rq-form-title, .rq-empty,
             [data-testid="stForm"] {direction: rtl; text-align: right;}
             .brand {text-align: center;}
             .footer-note, .tips-closing {text-align: center;}
@@ -758,6 +1107,7 @@ if page == "Rider Performance":
             st.warning(T["need_id"])
         else:
             st.session_state["last_id"] = rider_id
+            st.session_state["rider_view"] = "perf"
 
     shown_id = st.session_state.get("last_id")
 
@@ -779,6 +1129,22 @@ if page == "Rider Performance":
                 <div style="display:inline-block;min-width:76px;text-align:center;border-radius:14px;padding:10px 18px;font-size:25px;font-weight:900;margin-top:4px;background:{segment_color(seg)};color:#ffffff;">{html.escape(seg)}</div>
             </div>
             """, unsafe_allow_html=True)
+
+            RQ = REQ[lang]
+            view = st.session_state.get("rider_view", "perf")
+            rq_n = rider_request_count(d["rider_id"])
+            vb1, vb2 = st.columns(2)
+            if vb1.button(RQ["tab_perf"], key="vw_perf", use_container_width=True,
+                          type="primary" if view == "perf" else "secondary"):
+                st.session_state["rider_view"] = "perf"
+                st.rerun()
+            if vb2.button(RQ["tab_req"] + (" (" + str(rq_n) + ")" if rq_n else ""), key="vw_req",
+                          use_container_width=True, type="primary" if view == "req" else "secondary"):
+                st.session_state["rider_view"] = "req"
+                st.rerun()
+            if view == "req":
+                render_requests_page(d, lang)
+                st.stop()
 
             render_segment_change(d, seg, T, CHANGE[lang])
             render_target_status(d, TARGETMSG[lang])
@@ -823,7 +1189,9 @@ else:
         st.stop()
 
     st.title("⚙️ Performance Admin")
-    tab_upload, tab_data = st.tabs(["📥 Upload", "📊 Current Data"])
+    _pend = count_requests("pending")
+    tab_upload, tab_data, tab_req = st.tabs(["📥 Upload", "📊 Current Data",
+                                             "📨 Requests" + (" (" + str(_pend) + ")" if _pend else "")])
 
     with tab_upload:
         st.info("⚠️ أي رفع جديد هيمسح كل البيانات القديمة ويحط الملف الجديد مكانها.")
@@ -894,3 +1262,6 @@ else:
                 mime="text/csv",
                 use_container_width=True,
             )
+
+    with tab_req:
+        admin_requests_ui()
