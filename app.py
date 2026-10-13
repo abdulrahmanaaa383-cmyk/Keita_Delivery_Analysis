@@ -2,6 +2,7 @@ import hmac
 import html
 import re
 import sqlite3
+from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -13,12 +14,19 @@ import streamlit.components.v1 as components
 # RIDER PERFORMANCE PORTAL (simplified + flexible)
 # - كل رفع جديد بيمسح البيانات القديمة بالكامل
 # - بيحتاج 11 عمود بس، وبيتعرف عليهم تلقائيًا أو تختارهم يدوي
+# - نظام الطلبات (إنترنت / سلفة / إجازة) متربط بـ Google Sheet تلقائي
 # ============================================================
 
 st.set_page_config(page_title="Rider Performance", page_icon="🏆", layout="centered")
 
 DB_PATH = Path(__file__).parent / "rider_performance.db"
 TABLE = "rider_stats"
+
+# ------------------------------------------------------------
+# إعدادات الطلبات (عدّلها زي ما تحب)
+# ------------------------------------------------------------
+MAX_ADVANCE = 3000      # أقصى مبلغ سلفة (ريال)
+MAX_LEAVE_DAYS = 14     # أقصى عدد أيام إجازة في الطلب الواحد
 
 # field_key: (اسم العرض, إجباري؟, أسماء بديلة محتملة للعمود - بعد التنضيف)
 FIELDS = {
@@ -209,6 +217,12 @@ def build_clean_df(raw, mapping):
 # Admin auth
 # ------------------------------------------------------------
 def admin_password():
+    # الأفضل تحط ADMIN_PASSWORD في Secrets، ولو مش موجود بيستخدم القيمة القديمة
+    try:
+        if "ADMIN_PASSWORD" in st.secrets:
+            return str(st.secrets["ADMIN_PASSWORD"])
+    except Exception:
+        pass
     return "admin 444"
 
 
@@ -283,11 +297,39 @@ st.markdown("""
     .rq-meta {margin-top:8px; font-size:11px; color:#94a3b8; font-weight:600;}
     .rq-empty {text-align:center; color:#94a3b8; padding:22px; background:#f8fafc; border:1px dashed #cbd5e1; border-radius:16px;}
     .rq-admin {direction:rtl; text-align:right;}
-    .rq-kpis {display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; margin-bottom:18px; direction:rtl;}
+    .rq-kpis {display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; margin-bottom:14px; direction:rtl;}
     .rq-kpi {background:#fff; border:1px solid #eceff7; border-radius:18px; padding:14px 18px; border-right:6px solid var(--c);
              box-shadow:0 6px 18px rgba(15,23,42,.05); text-align:right;}
     .rq-kpi-l {color:#64748b; font-weight:700; font-size:13px;} .rq-kpi-v {font-size:34px; font-weight:800; color:#0f172a; line-height:1.15;}
     .rq-kpi-s {color:#94a3b8; font-size:12px; font-weight:600;}
+
+    /* ---------- Admin look ---------- */
+    .adm-banner {direction:rtl; text-align:right; background:linear-gradient(135deg,#0f172a 0%,#1e293b 60%,#334155 100%);
+                 color:#fff; border-radius:24px; padding:24px 28px; margin-bottom:18px;
+                 box-shadow:0 14px 40px rgba(15,23,42,.22); display:flex; justify-content:space-between;
+                 align-items:center; gap:14px; flex-wrap:wrap;}
+    .adm-title {font-size:26px; font-weight:800; letter-spacing:-.3px;}
+    .adm-sub {color:#94a3b8; font-size:13px; margin-top:4px; font-weight:600;}
+    .adm-chips {display:flex; gap:8px; flex-wrap:wrap;}
+    .adm-chip {background:rgba(255,255,255,.10); border:1px solid rgba(255,255,255,.18); border-radius:999px;
+               padding:6px 14px; font-size:13px; font-weight:700; color:#e2e8f0;}
+    .adm-chip.warn {background:rgba(245,158,11,.22); border-color:rgba(245,158,11,.55); color:#fde68a;}
+    .adm-chip.good {background:rgba(22,163,74,.22); border-color:rgba(22,163,74,.55); color:#bbf7d0;}
+    .adm-section {direction:rtl; text-align:right; font-size:18px; font-weight:800; color:#0f172a; margin:22px 0 10px;}
+    .adm-panel {direction:rtl; text-align:right; background:#fff; border:1px solid #e5e7eb; border-radius:18px;
+                padding:16px 18px; margin-bottom:12px; box-shadow:0 6px 18px rgba(15,23,42,.05);}
+    .adm-rider-head {direction:rtl; text-align:right; background:linear-gradient(145deg,#0f172a,#1e293b); color:#fff;
+                     border-radius:20px; padding:20px 24px; margin:10px 0 14px;}
+    .adm-rider-head b {font-size:22px;} .adm-rider-head small {color:#cbd5e1; font-weight:600;}
+    .ctx {display:flex; gap:6px; flex-wrap:wrap; margin-top:10px;}
+    .ctx-chip {background:color-mix(in srgb, var(--b,#64748b) 12%, white); color:var(--b,#334155);
+               border:1px solid color-mix(in srgb, var(--b,#64748b) 35%, white);
+               border-radius:999px; padding:3px 10px; font-size:12px; font-weight:700;}
+    .stTabs [data-baseweb="tab-list"] {gap:6px; flex-wrap:wrap;}
+    .stTabs [data-baseweb="tab"] {background:#f1f5f9; border-radius:12px; padding:8px 16px; font-weight:700; height:auto;}
+    .stTabs [aria-selected="true"] {background:#0f172a;}
+    .stTabs [aria-selected="true"] p {color:#fff !important;}
+    .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] {display:none;}
 
     .tg-card {border-radius:20px; padding:18px 20px; margin-top:18px; border:2px solid;}
     .tg-card.ok {background:#f0fdf4; border-color:#16a34a; color:#14532d;}
@@ -750,12 +792,13 @@ def render_target_status(d, M):
 
 # ============================================================
 # 📨 نظام الطلبات: إنترنت / سلفة / إجازة
-# المندوب يبعت من صفحته، والأدمن يشوفها ويوافق أو يرفض من تاب Requests
+# المندوب يبعت من صفحته، والأدمن يشوفها ويوافق أو يرفض من تاب الطلبات
+# وكل طلب جديد/تغيير حالة بيتبعت تلقائي لـ Google Sheet
 # ============================================================
 KINDS = ["internet", "advance", "leave"]
 KIND_ICON = {"internet": "🌐", "advance": "💵", "leave": "🌴"}
 KIND_COLOR = {"internet": "#0ea5e9", "advance": "#8b5cf6", "leave": "#14b8a6"}
-STATUS_COLOR = {"pending": "#f59e0b", "approved": "#16a34a", "rejected": "#dc2626"}
+STATUS_COLOR = {"pending": "#f59e0b", "approved": "#16a34a", "rejected": "#dc2626", "cancelled": "#64748b"}
 KSA_TZ = timezone(timedelta(hours=3))
 
 REQ = {
@@ -769,10 +812,14 @@ REQ = {
         "ok": "✅ Your request was sent (No. {n}). The management will review it.",
         "err_phone": "Please enter a valid mobile number.", "err_amount": "Please enter the amount.",
         "err_dates": "The end date must be the same day or after the start date.",
+        "err_max_adv": "The maximum advance is {m} SAR.",
+        "err_max_leave": "The maximum leave per request is {m} days.",
+        "overlap": "You already have a leave request on these dates.",
+        "hint_adv": "Maximum {m} SAR", "hint_leave": "Maximum {m} days per request",
         "dup": "You already have a pending request of this type.",
         "my_title": "Your requests", "none": "You have no requests yet.",
-        "pending": "⏳ Pending", "approved": "✅ Approved", "rejected": "❌ Rejected",
-        "admin_note": "Management note", "days": "days", "sar": "SAR",
+        "pending": "⏳ Pending", "approved": "✅ Approved", "rejected": "❌ Rejected", "cancelled": "🚫 Cancelled",
+        "cancel": "Cancel this request", "admin_note": "Management note", "days": "days", "sar": "SAR",
         "names": {"internet": "Internet request", "advance": "Advance request", "leave": "Leave request"},
     },
     "ar": {
@@ -785,10 +832,14 @@ REQ = {
         "ok": "✅ تم إرسال طلبك (رقم {n}). الإدارة هتراجعه.",
         "err_phone": "من فضلك اكتب رقم جوال صحيح.", "err_amount": "من فضلك اكتب المبلغ.",
         "err_dates": "تاريخ النهاية لازم يكون نفس يوم البداية أو بعده.",
+        "err_max_adv": "أقصى مبلغ للسلفة {m} ريال.",
+        "err_max_leave": "أقصى مدة إجازة في الطلب الواحد {m} يوم.",
+        "overlap": "عندك طلب إجازة بالفعل في نفس التواريخ دي.",
+        "hint_adv": "الحد الأقصى {m} ريال", "hint_leave": "الحد الأقصى {m} يوم في الطلب",
         "dup": "عندك طلب من النوع ده قيد المراجعة بالفعل.",
         "my_title": "طلباتك", "none": "مفيش طلبات لسه.",
-        "pending": "⏳ قيد المراجعة", "approved": "✅ تمت الموافقة", "rejected": "❌ مرفوض",
-        "admin_note": "ملاحظة الإدارة", "days": "يوم", "sar": "ريال",
+        "pending": "⏳ قيد المراجعة", "approved": "✅ تمت الموافقة", "rejected": "❌ مرفوض", "cancelled": "🚫 ملغي",
+        "cancel": "إلغاء الطلب", "admin_note": "ملاحظة الإدارة", "days": "يوم", "sar": "ريال",
         "names": {"internet": "طلب إنترنت", "advance": "طلب سلفة", "leave": "طلب إجازة"},
     },
     "ur": {
@@ -801,10 +852,14 @@ REQ = {
         "ok": "✅ آپ کی درخواست بھیج دی گئی (نمبر {n})۔ انتظامیہ جائزہ لے گی۔",
         "err_phone": "براہ کرم درست موبائل نمبر درج کریں۔", "err_amount": "براہ کرم رقم درج کریں۔",
         "err_dates": "آخری تاریخ شروع کے دن یا اس کے بعد ہونی چاہیے۔",
+        "err_max_adv": "ایڈوانس کی زیادہ سے زیادہ رقم {m} ریال ہے۔",
+        "err_max_leave": "ایک درخواست میں زیادہ سے زیادہ {m} دن کی چھٹی ہو سکتی ہے۔",
+        "overlap": "ان تاریخوں میں آپ کی چھٹی کی درخواست پہلے سے موجود ہے۔",
+        "hint_adv": "زیادہ سے زیادہ {m} ریال", "hint_leave": "ایک درخواست میں زیادہ سے زیادہ {m} دن",
         "dup": "اس قسم کی ایک درخواست پہلے سے زیر جائزہ ہے۔",
         "my_title": "آپ کی درخواستیں", "none": "ابھی تک کوئی درخواست نہیں۔",
-        "pending": "⏳ زیر جائزہ", "approved": "✅ منظور", "rejected": "❌ مسترد",
-        "admin_note": "انتظامیہ کا نوٹ", "days": "دن", "sar": "ریال",
+        "pending": "⏳ زیر جائزہ", "approved": "✅ منظور", "rejected": "❌ مسترد", "cancelled": "🚫 منسوخ",
+        "cancel": "درخواست منسوخ کریں", "admin_note": "انتظامیہ کا نوٹ", "days": "دن", "sar": "ریال",
         "names": {"internet": "انٹرنیٹ کی درخواست", "advance": "ایڈوانس کی درخواست", "leave": "چھٹی کی درخواست"},
     },
     "bn": {
@@ -817,10 +872,14 @@ REQ = {
         "ok": "✅ আপনার অনুরোধ পাঠানো হয়েছে (নম্বর {n})। ম্যানেজমেন্ট পর্যালোচনা করবে।",
         "err_phone": "অনুগ্রহ করে সঠিক মোবাইল নম্বর দিন।", "err_amount": "অনুগ্রহ করে পরিমাণ লিখুন।",
         "err_dates": "শেষ তারিখ শুরুর দিনে বা তার পরে হতে হবে।",
+        "err_max_adv": "সর্বোচ্চ অগ্রিম {m} রিয়াল।",
+        "err_max_leave": "একটি অনুরোধে সর্বোচ্চ {m} দিন ছুটি নেওয়া যাবে।",
+        "overlap": "এই তারিখগুলোতে আপনার ছুটির অনুরোধ ইতিমধ্যে আছে।",
+        "hint_adv": "সর্বোচ্চ {m} রিয়াল", "hint_leave": "প্রতি অনুরোধে সর্বোচ্চ {m} দিন",
         "dup": "এই ধরনের একটি অনুরোধ ইতিমধ্যে পর্যালোচনাধীন আছে।",
         "my_title": "আপনার অনুরোধসমূহ", "none": "এখনো কোনো অনুরোধ নেই।",
-        "pending": "⏳ পর্যালোচনাধীন", "approved": "✅ অনুমোদিত", "rejected": "❌ প্রত্যাখ্যাত",
-        "admin_note": "ম্যানেজমেন্টের নোট", "days": "দিন", "sar": "রিয়াল",
+        "pending": "⏳ পর্যালোচনাধীন", "approved": "✅ অনুমোদিত", "rejected": "❌ প্রত্যাখ্যাত", "cancelled": "🚫 বাতিল",
+        "cancel": "অনুরোধ বাতিল করুন", "admin_note": "ম্যানেজমেন্টের নোট", "days": "দিন", "sar": "রিয়াল",
         "names": {"internet": "ইন্টারনেটের অনুরোধ", "advance": "অগ্রিমের অনুরোধ", "leave": "ছুটির অনুরোধ"},
     },
 }
@@ -828,11 +887,233 @@ REQ = {
 # نصوص الأدمن (عربي)
 AR_ADMIN = {
     "kind": {"internet": "🌐 طلب إنترنت", "advance": "💵 طلب سلفة", "leave": "🌴 طلب إجازة"},
-    "status": {"pending": "⏳ قيد المراجعة", "approved": "✅ تمت الموافقة", "rejected": "❌ مرفوض"},
+    "status": {"pending": "⏳ قيد المراجعة", "approved": "✅ تمت الموافقة", "rejected": "❌ مرفوض",
+               "cancelled": "🚫 ألغاه المندوب"},
     "labels": {"sar": "ريال", "days": "يوم", "admin_note": "ملاحظة الإدارة"},
 }
 
+# ------------------------------------------------------------
+# Google Sheets: أي طلب جديد أو تغيير حالة بيتكتب في الشيت تلقائي
+# ------------------------------------------------------------
+SHEET_TAB = "Requests"
+SUMMARY_TAB = "Summary"
+HEADERS = ["رقم الطلب", "التاريخ", "الوقت", "رقم المندوب", "اسم المندوب", "نوع الطلب", "التفاصيل",
+           "المبلغ (ريال)", "رقم الجوال", "من تاريخ", "إلى تاريخ", "عدد الأيام", "ملاحظة المندوب",
+           "الحالة", "ملاحظة الإدارة", "آخر تحديث"]
+LAST_COL = "P"  # آخر عمود (16 عمود)
+KIND_AR = {"internet": "إنترنت", "advance": "سلفة", "leave": "إجازة"}
+KIND_AR_REV = {v: k for k, v in KIND_AR.items()}
+STATUS_AR = {"pending": "قيد المراجعة", "approved": "تمت الموافقة", "rejected": "مرفوض", "cancelled": "ملغي"}
+STATUS_AR_REV = {v: k for k, v in STATUS_AR.items()}
 
+
+def gs_enabled():
+    try:
+        return "gcp_service_account" in st.secrets and "REQUESTS_SHEET_ID" in st.secrets
+    except Exception:
+        return False
+
+
+def _gs_style(sh, ws):
+    try:
+        ws.format(f"A1:{LAST_COL}1", {
+            "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
+            "backgroundColor": {"red": 0.06, "green": 0.09, "blue": 0.16},
+            "horizontalAlignment": "CENTER",
+        })
+        ws.freeze(rows=1)
+        ws.set_basic_filter()
+        sh.batch_update({"requests": [{"updateSheetProperties": {
+            "properties": {"sheetId": ws.id, "rightToLeft": True}, "fields": "rightToLeft"}}]})
+    except Exception:
+        pass
+
+
+def _gs_summary(sh):
+    """تاب Summary فيه عدّادات جاهزة بالمعادلات (بيتعمل مرة واحدة)."""
+    import gspread
+    try:
+        sh.worksheet(SUMMARY_TAB)
+        return
+    except gspread.exceptions.WorksheetNotFound:
+        pass
+    try:
+        ws = sh.add_worksheet(title=SUMMARY_TAB, rows=20, cols=7)
+        statuses = list(STATUS_AR.values())
+        rows = [["النوع"] + statuses + ["الإجمالي"]]
+        for i, k in enumerate(KINDS, start=2):
+            row = [KIND_AR[k]]
+            for j in range(len(statuses)):
+                col = chr(ord("B") + j)
+                row.append(f"=COUNTIFS({SHEET_TAB}!$F:$F,$A{i},{SHEET_TAB}!$N:$N,{col}$1)")
+            row.append(f"=SUM(B{i}:E{i})")
+            rows.append(row)
+        rows.append(["الإجمالي"] + [f"=SUM({chr(ord('B') + j)}2:{chr(ord('B') + j)}4)" for j in range(5)])
+        rows.append([])
+        rows.append(["إجمالي السلف الموافق عليها (ريال)",
+                     f'=SUMIFS({SHEET_TAB}!$H:$H,{SHEET_TAB}!$F:$F,"سلفة",{SHEET_TAB}!$N:$N,"تمت الموافقة")'])
+        rows.append(["إجمالي أيام الإجازات الموافق عليها",
+                     f'=SUMIFS({SHEET_TAB}!$L:$L,{SHEET_TAB}!$F:$F,"إجازة",{SHEET_TAB}!$N:$N,"تمت الموافقة")'])
+        ws.update(range_name="A1", values=rows, value_input_option="USER_ENTERED")
+        ws.format("A1:F1", {"textFormat": {"bold": True}, "horizontalAlignment": "CENTER"})
+        sh.batch_update({"requests": [{"updateSheetProperties": {
+            "properties": {"sheetId": ws.id, "rightToLeft": True}, "fields": "rightToLeft"}}]})
+    except Exception:
+        pass
+
+
+@st.cache_resource(show_spinner=False, ttl=1800)
+def _gs_ws():
+    import gspread
+    from google.oauth2.service_account import Credentials
+
+    info = dict(st.secrets["gcp_service_account"])
+    if "private_key" in info:
+        info["private_key"] = info["private_key"].replace("\\n", "\n")
+    creds = Credentials.from_service_account_info(
+        info, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_key(str(st.secrets["REQUESTS_SHEET_ID"]))
+    try:
+        ws = sh.worksheet(SHEET_TAB)
+    except gspread.exceptions.WorksheetNotFound:
+        ws = sh.add_worksheet(title=SHEET_TAB, rows=2000, cols=len(HEADERS))
+    if not ws.row_values(1):
+        ws.update(range_name="A1", values=[HEADERS])
+        _gs_style(sh, ws)
+    _gs_summary(sh)
+    return ws
+
+
+def req_days(r):
+    try:
+        return (date.fromisoformat(r["date_to"]) - date.fromisoformat(r["date_from"])).days + 1
+    except Exception:
+        return None
+
+
+def req_to_row(r):
+    created = str(r.get("created_at") or "")
+    d_part, _, t_part = created.partition(" ")
+    kind = r["kind"]
+    days = (req_days(r) or "") if kind == "leave" else ""
+    if kind == "internet":
+        detail = r.get("phone") or ""
+    elif kind == "advance":
+        detail = f"{(r.get('amount') or 0):,.0f} ريال"
+    else:
+        detail = f"{r.get('date_from') or ''} → {r.get('date_to') or ''} ({days} يوم)"
+    return [
+        int(r["id"]), d_part, t_part, str(r["rider_id"]), r.get("rider_name") or "",
+        KIND_AR.get(kind, kind), detail,
+        float(r["amount"]) if kind == "advance" and r.get("amount") is not None else "",
+        (r.get("phone") or "") if kind == "internet" else "",
+        (r.get("date_from") or "") if kind == "leave" else "",
+        (r.get("date_to") or "") if kind == "leave" else "",
+        days, r.get("note") or "", STATUS_AR.get(r["status"], r["status"]),
+        r.get("admin_note") or "", r.get("updated_at") or "",
+    ]
+
+
+def _mark_synced(ids, value=1):
+    conn = get_conn()
+    conn.executemany("UPDATE requests SET gs_synced = ? WHERE id = ?", [(value, int(i)) for i in ids])
+    conn.commit()
+    conn.close()
+
+
+def gs_push(req_id):
+    """يكتب/يحدّث صف الطلب في الشيت. بيرجّع (نجح؟, رسالة)."""
+    if not gs_enabled():
+        return False, "Google Sheet غير مفعّل"
+    r = get_request(req_id)
+    if not r:
+        return False, "الطلب غير موجود"
+    try:
+        ws = _gs_ws()
+        row = req_to_row(r)
+        ids = ws.col_values(1)
+        key = str(r["id"])
+        if key in ids:
+            pos = ids.index(key) + 1
+            ws.update(range_name=f"A{pos}:{LAST_COL}{pos}", values=[row], value_input_option="RAW")
+        else:
+            ws.append_row(row, value_input_option="RAW", table_range="A1")
+        _mark_synced([r["id"]])
+        return True, ""
+    except Exception as ex:
+        return False, f"{type(ex).__name__}: {str(ex)[:160]}"
+
+
+def gs_push_all():
+    """مزامنة كاملة: يمسح الشيت ويكتب كل الطلبات من الأول."""
+    ws = _gs_ws()
+    rows = sorted(list_requests(limit=100000), key=lambda x: x["id"])
+    ws.clear()
+    ws.update(range_name="A1", values=[HEADERS] + [req_to_row(r) for r in rows], value_input_option="RAW")
+    _gs_style(ws.spreadsheet, ws)
+    _mark_synced([r["id"] for r in rows])
+    return len(rows)
+
+
+def count_unsynced():
+    try:
+        init_requests_db()
+        conn = get_conn()
+        n = conn.execute("SELECT COUNT(*) FROM requests WHERE COALESCE(gs_synced,0) = 0").fetchone()[0]
+        conn.close()
+        return int(n)
+    except Exception:
+        return 0
+
+
+def gs_push_unsynced():
+    conn = get_conn()
+    ids = [x[0] for x in conn.execute("SELECT id FROM requests WHERE COALESCE(gs_synced,0) = 0 ORDER BY id").fetchall()]
+    conn.close()
+    if len(ids) > 10:
+        return gs_push_all(), 0
+    ok_n = 0
+    for i in ids:
+        ok, _ = gs_push(i)
+        ok_n += 1 if ok else 0
+    return ok_n, len(ids) - ok_n
+
+
+def gs_restore():
+    """لو قاعدة البيانات المحلية اتمسحت (ريستارت للسيرفر)، نرجّع الطلبات من الشيت."""
+    ws = _gs_ws()
+    vals = ws.get_all_values()[1:]
+    conn = get_conn()
+    n = 0
+    for v in vals:
+        v = (list(v) + [""] * len(HEADERS))[:len(HEADERS)]
+        try:
+            rid = int(v[0])
+        except Exception:
+            continue
+        kind = KIND_AR_REV.get(v[5])
+        if not kind:
+            continue
+        try:
+            amount = float(str(v[7]).replace(",", "")) if str(v[7]).strip() else None
+        except Exception:
+            amount = None
+        conn.execute(
+            """INSERT OR IGNORE INTO requests (id, rider_id, rider_name, kind, amount, phone, date_from, date_to,
+                   note, status, admin_note, created_at, updated_at, lang, gs_synced)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)""",
+            (rid, v[3], v[4], kind, amount, v[8] or None, v[9] or None, v[10] or None, v[12],
+             STATUS_AR_REV.get(v[13], "pending"), v[14], f"{v[1]} {v[2]}".strip(), v[15] or v[1], "ar"))
+        n += 1
+    conn.commit()
+    conn.close()
+    return n
+
+
+# ------------------------------------------------------------
+# Requests DB
+# ------------------------------------------------------------
 def init_requests_db():
     conn = get_conn()
     conn.execute("""
@@ -841,32 +1122,66 @@ def init_requests_db():
             rider_id TEXT NOT NULL, rider_name TEXT, kind TEXT NOT NULL,
             amount REAL, phone TEXT, date_from TEXT, date_to TEXT, note TEXT,
             status TEXT NOT NULL DEFAULT 'pending', admin_note TEXT,
-            created_at TEXT NOT NULL, updated_at TEXT, lang TEXT
+            created_at TEXT NOT NULL, updated_at TEXT, lang TEXT,
+            gs_synced INTEGER DEFAULT 0
         )
     """)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(requests)").fetchall()]
+    if "gs_synced" not in cols:  # ترقية قاعدة قديمة
+        conn.execute("ALTER TABLE requests ADD COLUMN gs_synced INTEGER DEFAULT 0")
     conn.commit()
     conn.close()
+
+
+@st.cache_resource(show_spinner=False)
+def _restore_once():
+    """بيشتغل مرة واحدة لكل تشغيل للسيرفر: لو مفيش طلبات محلية والشيت فيه طلبات، يرجّعها."""
+    try:
+        init_requests_db()
+        conn = get_conn()
+        n = conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
+        conn.close()
+        if n == 0 and gs_enabled():
+            gs_restore()
+    except Exception:
+        pass
+    return True
 
 
 def now_ksa():
     return datetime.now(KSA_TZ).strftime("%Y-%m-%d %H:%M")
 
 
+def get_request(req_id):
+    init_requests_db()
+    conn = get_conn()
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM requests WHERE id = ?", (int(req_id),)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def add_request(rider_id, rider_name, kind, amount=None, phone=None, date_from=None, date_to=None, note="", lang="en"):
+    _restore_once()
     init_requests_db()
     conn = get_conn()
     cur = conn.execute(
         """INSERT INTO requests (rider_id, rider_name, kind, amount, phone, date_from, date_to, note,
-                                 status, created_at, updated_at, lang)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)""",
+                                 status, created_at, updated_at, lang, gs_synced)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, 0)""",
         (str(rider_id), rider_name, kind, amount, phone, date_from, date_to, note, now_ksa(), now_ksa(), lang))
     conn.commit()
     new_id = cur.lastrowid
     conn.close()
+    try:
+        gs_push(new_id)  # لو فشل، الطلب محفوظ محليًا وبيتزامن بعدين من تاب Google Sheet
+    except Exception:
+        pass
     return new_id
 
 
 def list_requests(rider_id=None, status=None, kind=None, limit=500):
+    _restore_once()
     init_requests_db()
     q, params = "SELECT * FROM requests WHERE 1=1", []
     if rider_id:
@@ -887,16 +1202,24 @@ def list_requests(rider_id=None, status=None, kind=None, limit=500):
     return rows
 
 
-def update_request(req_id, status, admin_note):
+def update_request(req_id, status, admin_note=None):
+    """admin_note=None معناها سيب الملاحظة زي ما هي."""
     conn = get_conn()
-    conn.execute("UPDATE requests SET status = ?, admin_note = ?, updated_at = ? WHERE id = ?",
-                 (status, admin_note.strip(), now_ksa(), int(req_id)))
+    conn.execute(
+        "UPDATE requests SET status = ?, admin_note = COALESCE(?, admin_note), updated_at = ?, gs_synced = 0 WHERE id = ?",
+        (status, None if admin_note is None else admin_note.strip(), now_ksa(), int(req_id)))
     conn.commit()
     conn.close()
+    ok, err = gs_push(req_id)
+    if gs_enabled() and not ok:
+        st.session_state["flash"] = ("warning", "اتحفظ التغيير، بس مزامنة Google Sheet فشلت (" + err + "). "
+                                     "تقدر تعيد المزامنة من تاب Google Sheet.")
+    return ok
 
 
 def count_requests(status="pending"):
     try:
+        _restore_once()
         init_requests_db()
         conn = get_conn()
         n = conn.execute("SELECT COUNT(*) FROM requests WHERE status = ?", (status,)).fetchone()[0]
@@ -910,20 +1233,31 @@ def has_pending(rider_id, kind):
     return bool(list_requests(rider_id=rider_id, status="pending", kind=kind, limit=1))
 
 
+def leave_overlap(rider_id, d_from, d_to):
+    for r in list_requests(rider_id=rider_id, kind="leave", limit=200):
+        if r["status"] not in ("pending", "approved"):
+            continue
+        try:
+            a, b = date.fromisoformat(r["date_from"]), date.fromisoformat(r["date_to"])
+        except Exception:
+            continue
+        if d_from <= b and d_to >= a:
+            return True
+    return False
+
+
 def detail_text(r, labels):
     if r["kind"] == "internet":
         return "📱 " + (r.get("phone") or "—")
     if r["kind"] == "advance":
         return "💰 " + f"{(r.get('amount') or 0):,.0f} " + labels["sar"]
-    try:
-        n = (date.fromisoformat(r["date_to"]) - date.fromisoformat(r["date_from"])).days + 1
-    except Exception:
-        n = 1
+    n = req_days(r) or 1
     return "📅 " + str(r["date_from"]) + " → " + str(r["date_to"]) + "  (" + str(n) + " " + labels["days"] + ")"
 
 
-def request_card(r, kind_label, status_label, labels, admin=False):
+def request_card(r, kind_label, status_label, labels, admin=False, ctx="", rtl=None):
     e = html.escape
+    rtl = admin if rtl is None else rtl
     color = KIND_COLOR.get(r["kind"], "#64748b")
     bcolor = STATUS_COLOR.get(r["status"], "#64748b")
     who = ""
@@ -935,12 +1269,12 @@ def request_card(r, kind_label, status_label, labels, admin=False):
     anote = ""
     if r.get("admin_note"):
         anote = '<div class="rq-anote"><b>' + e(labels["admin_note"]) + ":</b> " + e(r["admin_note"]) + "</div>"
-    cls = "rq-card rq-admin" if admin else "rq-card"
+    cls = "rq-card rq-admin" if rtl else "rq-card"
     return (
         '<div class="' + cls + '" style="--c:' + color + '">'
         '<div class="rq-head"><span class="rq-kind">' + e(kind_label) + '</span>'
         '<span class="rq-badge" style="--b:' + bcolor + '">' + e(status_label) + "</span></div>"
-        + who + '<div class="rq-detail">' + e(detail_text(r, labels)) + "</div>" + note + anote +
+        + who + '<div class="rq-detail">' + e(detail_text(r, labels)) + "</div>" + note + ctx + anote +
         '<div class="rq-meta">#' + str(r["id"]) + " · " + e(r["created_at"]) + "</div></div>"
     )
 
@@ -975,11 +1309,13 @@ def render_requests_page(d, lang):
         if kind == "internet":
             phone = st.text_input(R["f_phone"], placeholder=R["f_phone_ph"], key="rq_phone", max_chars=20)
         elif kind == "advance":
-            amount = st.number_input(R["f_amount"], min_value=0, max_value=100000, value=0, step=50, key="rq_amount")
+            amount = st.number_input(R["f_amount"], min_value=0, max_value=MAX_ADVANCE, value=0, step=50,
+                                     key="rq_amount", help=R["hint_adv"].format(m=f"{MAX_ADVANCE:,}"))
         else:
             c1, c2 = st.columns(2)
             d_from = c1.date_input(R["f_from"], value=date.today(), min_value=date.today(), key="rq_from")
-            d_to = c2.date_input(R["f_to"], value=date.today(), min_value=date.today(), key="rq_to")
+            d_to = c2.date_input(R["f_to"], value=date.today(), min_value=date.today(), key="rq_to",
+                                 help=R["hint_leave"].format(m=MAX_LEAVE_DAYS))
         note = st.text_area(R["f_note"], height=80, max_chars=300, key="rq_note")
         sent = st.form_submit_button(R["submit"], type="primary", use_container_width=True)
 
@@ -989,18 +1325,25 @@ def render_requests_page(d, lang):
             st.error(R["err_phone"])
         elif kind == "advance" and not amount:
             st.error(R["err_amount"])
+        elif kind == "advance" and amount > MAX_ADVANCE:
+            st.error(R["err_max_adv"].format(m=f"{MAX_ADVANCE:,}"))
         elif kind == "leave" and d_to < d_from:
             st.error(R["err_dates"])
+        elif kind == "leave" and ((d_to - d_from).days + 1) > MAX_LEAVE_DAYS:
+            st.error(R["err_max_leave"].format(m=MAX_LEAVE_DAYS))
+        elif kind == "leave" and leave_overlap(rid, d_from, d_to):
+            st.warning(R["overlap"])
         elif has_pending(rid, kind):
             st.warning(R["dup"])
         else:
-            new_id = add_request(
-                rid, name, kind,
-                amount=float(amount) if kind == "advance" else None,
-                phone=(phone or "").strip() if kind == "internet" else None,
-                date_from=d_from.isoformat() if d_from else None,
-                date_to=d_to.isoformat() if d_to else None,
-                note=(note or "").strip(), lang=lang)
+            with st.spinner("..."):
+                new_id = add_request(
+                    rid, name, kind,
+                    amount=float(amount) if kind == "advance" else None,
+                    phone=(phone or "").strip() if kind == "internet" else None,
+                    date_from=d_from.isoformat() if d_from else None,
+                    date_to=d_to.isoformat() if d_to else None,
+                    note=(note or "").strip(), lang=lang)
             st.success(R["ok"].format(n=new_id))
 
     st.markdown('<div class="section-title">' + e(R["my_title"]) + "</div>", unsafe_allow_html=True)
@@ -1010,68 +1353,373 @@ def render_requests_page(d, lang):
     labels = {"sar": R["sar"], "days": R["days"], "admin_note": R["admin_note"]}
     for r in mine:
         st.markdown(request_card(r, R["names"][r["kind"]], R[r["status"]], labels), unsafe_allow_html=True)
+        if r["status"] == "pending":
+            if st.button(R["cancel"], key="cx_" + str(r["id"])):
+                fresh = get_request(r["id"])
+                if fresh and str(fresh["rider_id"]) == rid and fresh["status"] == "pending":
+                    update_request(r["id"], "cancelled")
+                st.rerun()
+
+
+# ============================================================
+# 🛠 واجهة الأدمن (احترافية)
+# ============================================================
+def perf_map():
+    df = get_all()
+    if df.empty:
+        return {}
+    return {str(x["rider_id"]): x for x in df.to_dict("records")}
+
+
+def kpi(label, value, sub, color):
+    e = html.escape
+    return ('<div class="rq-kpi" style="--c:' + color + '"><div class="rq-kpi-l">' + e(label) + '</div><div class="rq-kpi-v">'
+            + str(value) + '</div><div class="rq-kpi-s">' + e(sub) + "</div></div>")
+
+
+def kpi_row(items):
+    st.markdown('<div class="rq-kpis">' + "".join(kpi(*i) for i in items) + "</div>", unsafe_allow_html=True)
+
+
+def admin_section(text):
+    st.markdown('<div class="adm-section">' + html.escape(text) + "</div>", unsafe_allow_html=True)
+
+
+def avg_response_text(rows):
+    hrs = []
+    for r in rows:
+        if r["status"] in ("approved", "rejected") and r.get("updated_at") and r.get("created_at"):
+            try:
+                a = datetime.strptime(r["created_at"], "%Y-%m-%d %H:%M")
+                b = datetime.strptime(r["updated_at"], "%Y-%m-%d %H:%M")
+                hrs.append(max((b - a).total_seconds(), 0) / 3600)
+            except Exception:
+                continue
+    if not hrs:
+        return "—"
+    h = sum(hrs) / len(hrs)
+    return f"{round(h * 60)} دقيقة" if h < 1 else f"{h:.1f} ساعة"
+
+
+def admin_ctx(r, perf, rows):
+    """سطر معلومات مساعد للأدمن عشان ياخد القرار: أداء المندوب + تاريخه مع نفس نوع الطلب."""
+    e = html.escape
+    rid = str(r["rider_id"])
+    chips = []
+    p = perf.get(rid)
+    if p:
+        seg = str(p.get("segment") or "—")
+        chips.append('<span class="ctx-chip" style="--b:' + segment_color(seg) + '">Segment ' + e(seg) + "</span>")
+        chips.append('<span class="ctx-chip">📦 ' + e(fmt_int(p.get("orders"))) + " طلب</span>")
+        chips.append('<span class="ctx-chip">⏱ On-Time ' + e(fmt_pct(p.get("on_time_rate"))) + "</span>")
+        try:
+            tp, dc = int(p.get("target_per_day") or 0), int(p.get("days_covered") or 0)
+            if tp > 0 and dc > 0:
+                miss = max(tp * dc - int(p.get("orders") or 0), 0)
+                if miss == 0:
+                    chips.append('<span class="ctx-chip" style="--b:#16a34a">🎯 محقق التارجت</span>')
+                else:
+                    chips.append('<span class="ctx-chip" style="--b:#dc2626">🎯 ناقصه ' + str(miss) + " طلب عن التارجت</span>")
+        except Exception:
+            pass
+    else:
+        chips.append('<span class="ctx-chip" style="--b:#f59e0b">⚠️ المندوب مش موجود في الشيت الحالي</span>')
+
+    prev = [x for x in rows if str(x["rider_id"]) == rid and x["id"] != r["id"] and x["status"] == "approved"
+            and x["kind"] == r["kind"]]
+    if r["kind"] == "advance":
+        tot = sum((x.get("amount") or 0) for x in prev)
+        chips.append('<span class="ctx-chip" style="--b:#8b5cf6">💵 سلف سابقة موافق عليها: ' + str(len(prev))
+                     + " (" + f"{tot:,.0f}" + " ريال)</span>")
+    elif r["kind"] == "leave":
+        tot = sum((req_days(x) or 0) for x in prev)
+        chips.append('<span class="ctx-chip" style="--b:#14b8a6">🌴 إجازات سابقة موافق عليها: ' + str(len(prev))
+                     + " (" + str(tot) + " يوم)</span>")
+    else:
+        chips.append('<span class="ctx-chip" style="--b:#0ea5e9">🌐 طلبات إنترنت سابقة: ' + str(len(prev)) + "</span>")
+    return '<div class="ctx">' + "".join(chips) + "</div>"
+
+
+def admin_banner(pending):
+    chips = []
+    if pending:
+        chips.append('<span class="adm-chip warn">⏳ ' + str(pending) + " طلب قيد المراجعة</span>")
+    else:
+        chips.append('<span class="adm-chip good">✅ مفيش طلبات معلّقة</span>')
+    if gs_enabled():
+        un = count_unsynced()
+        chips.append('<span class="adm-chip good">🟢 Google Sheet متصل</span>' if un == 0 else
+                     '<span class="adm-chip warn">🟠 ' + str(un) + " طلب مش متزامن</span>")
+    else:
+        chips.append('<span class="adm-chip">⚪ Google Sheet غير مفعّل</span>')
+    st.markdown(
+        '<div class="adm-banner"><div><div class="adm-title">⚙️ لوحة إدارة المناديب</div>'
+        '<div class="adm-sub">' + datetime.now(KSA_TZ).strftime("%Y-%m-%d · %H:%M") + ' (توقيت السعودية)</div></div>'
+        '<div class="adm-chips">' + "".join(chips) + "</div></div>", unsafe_allow_html=True)
 
 
 def admin_requests_ui():
-    e = html.escape
-    rows = list_requests(limit=1000)
+    rows = list_requests(limit=5000)
+    perf = perf_map()
+
+    flash = st.session_state.pop("flash", None)
+    if flash:
+        getattr(st, flash[0])(flash[1])
+
     pend = [r for r in rows if r["status"] == "pending"]
     by = lambda k: [r for r in pend if r["kind"] == k]
     adv_sum = sum((r.get("amount") or 0) for r in by("advance"))
+    kpi_row([
+        ("⏳ قيد المراجعة", len(pend), "كل الأنواع", "#f59e0b"),
+        ("🌐 إنترنت", len(by("internet")), "قيد المراجعة", KIND_COLOR["internet"]),
+        ("💵 سلف", len(by("advance")), "إجمالي " + f"{adv_sum:,.0f}" + " ريال", KIND_COLOR["advance"]),
+        ("🌴 إجازات", len(by("leave")), "قيد المراجعة", KIND_COLOR["leave"]),
+    ])
 
-    def kpi(label, value, sub, color):
-        return ('<div class="rq-kpi" style="--c:' + color + '"><div class="rq-kpi-l">' + e(label) + '</div><div class="rq-kpi-v">'
-                + str(value) + '</div><div class="rq-kpi-s">' + e(sub) + "</div></div>")
-
-    st.markdown(
-        '<div class="rq-kpis">'
-        + kpi("⏳ طلبات قيد المراجعة", len(pend), "كل الأنواع", "#f59e0b")
-        + kpi("🌐 إنترنت", len(by("internet")), "قيد المراجعة", KIND_COLOR["internet"])
-        + kpi("💵 سلف", len(by("advance")), "إجمالي " + f"{adv_sum:,.0f}" + " ريال", KIND_COLOR["advance"])
-        + kpi("🌴 إجازات", len(by("leave")), "قيد المراجعة", KIND_COLOR["leave"])
-        + "</div>", unsafe_allow_html=True)
-
-    f1, f2, f3 = st.columns([2, 2, 2])
-    status_opts = {"⏳ قيد المراجعة": "pending", "✅ تمت الموافقة": "approved", "❌ مرفوضة": "rejected", "الكل": None}
+    f1, f2, f3, f4 = st.columns([2, 2, 2.4, 3])
+    status_opts = {"⏳ قيد المراجعة": "pending", "✅ تمت الموافقة": "approved", "❌ مرفوضة": "rejected",
+                   "🚫 ملغية": "cancelled", "الكل": None}
     status_pick = f1.selectbox("الحالة", list(status_opts.keys()), key="rqa_status")
     kind_opts = {"الكل": None, "🌐 إنترنت": "internet", "💵 سلفة": "advance", "🌴 إجازة": "leave"}
     kind_pick = f2.selectbox("النوع", list(kind_opts.keys()), key="rqa_kind")
-    q = f3.text_input("بحث بالـ ID أو الاسم", key="rqa_q").strip().lower()
+    rng = f3.date_input("الفترة (اختياري)", value=(), key="rqa_rng")
+    q = f4.text_input("بحث بالـ ID أو الاسم", key="rqa_q").strip().lower()
+
+    d1 = d2 = None
+    if isinstance(rng, (tuple, list)) and len(rng) == 2:
+        d1, d2 = rng[0].isoformat(), rng[1].isoformat()
+    elif isinstance(rng, (tuple, list)) and len(rng) == 1:
+        d1 = d2 = rng[0].isoformat()
 
     shown = [r for r in rows
              if (status_opts[status_pick] is None or r["status"] == status_opts[status_pick])
              and (kind_opts[kind_pick] is None or r["kind"] == kind_opts[kind_pick])
+             and (d1 is None or d1 <= str(r["created_at"])[:10] <= d2)
              and (not q or q in str(r["rider_id"]).lower() or q in (r.get("rider_name") or "").lower())]
+
+    v1, v2 = st.columns([3, 2])
+    v1.caption("النتيجة: " + str(len(shown)) + " طلب")
+    view = v2.radio("العرض", ["🗂 كروت", "📋 جدول"], horizontal=True, key="rqa_view", label_visibility="collapsed")
 
     if not shown:
         st.markdown('<div class="rq-empty">مفيش طلبات بالفلتر ده 🎉</div>', unsafe_allow_html=True)
-
-    for r in shown[:40]:
-        st.markdown(request_card(r, AR_ADMIN["kind"][r["kind"]], AR_ADMIN["status"][r["status"]],
-                                 AR_ADMIN["labels"], admin=True), unsafe_allow_html=True)
-        n_col, a_col, r_col, o_col = st.columns([5, 1.3, 1.3, 1.1])
-        note = n_col.text_input("ملاحظة للمندوب (اختياري)", value=r.get("admin_note") or "",
-                                key="rqn_" + str(r["id"]), label_visibility="collapsed",
-                                placeholder="ملاحظة للمندوب (اختياري)")
-        if a_col.button("✅ موافقة", key="rqa_ok_" + str(r["id"]), use_container_width=True):
-            update_request(r["id"], "approved", note)
-            st.rerun()
-        if r_col.button("❌ رفض", key="rqa_no_" + str(r["id"]), use_container_width=True):
-            update_request(r["id"], "rejected", note)
-            st.rerun()
-        if r["status"] != "pending" and o_col.button("↩", key="rqa_re_" + str(r["id"]), use_container_width=True,
-                                                      help="رجّع الطلب لقيد المراجعة"):
-            update_request(r["id"], "pending", note)
-            st.rerun()
-    if len(shown) > 40:
-        st.caption("معروض أحدث 40 طلب من " + str(len(shown)) + " — استخدم الفلتر لتضييق النتائج.")
+    elif view == "📋 جدول":
+        table = pd.DataFrame([req_to_row(r) for r in shown], columns=HEADERS)
+        st.dataframe(table, use_container_width=True, hide_index=True)
+    else:
+        limit = st.session_state.get("rqa_limit", 20)
+        for r in shown[:limit]:
+            st.markdown(request_card(r, AR_ADMIN["kind"][r["kind"]], AR_ADMIN["status"][r["status"]],
+                                     AR_ADMIN["labels"], admin=True, ctx=admin_ctx(r, perf, rows)),
+                        unsafe_allow_html=True)
+            n_col, a_col, r_col, o_col = st.columns([5, 1.3, 1.3, 1.1])
+            note = n_col.text_input("ملاحظة للمندوب (اختياري)", value=r.get("admin_note") or "",
+                                    key="rqn_" + str(r["id"]), label_visibility="collapsed",
+                                    placeholder="ملاحظة للمندوب (اختياري)")
+            if a_col.button("✅ موافقة", key="rqa_ok_" + str(r["id"]), use_container_width=True):
+                update_request(r["id"], "approved", note)
+                st.rerun()
+            if r_col.button("❌ رفض", key="rqa_no_" + str(r["id"]), use_container_width=True):
+                update_request(r["id"], "rejected", note)
+                st.rerun()
+            if r["status"] != "pending" and o_col.button("↩", key="rqa_re_" + str(r["id"]), use_container_width=True,
+                                                          help="رجّع الطلب لقيد المراجعة"):
+                update_request(r["id"], "pending", note)
+                st.rerun()
+        if len(shown) > limit:
+            if st.button("عرض المزيد (" + str(len(shown) - limit) + " متبقي)", use_container_width=True, key="rqa_more"):
+                st.session_state["rqa_limit"] = limit + 20
+                st.rerun()
 
     if rows:
-        out = pd.DataFrame(rows)[["id", "created_at", "rider_id", "rider_name", "kind", "status", "amount",
-                                  "phone", "date_from", "date_to", "note", "admin_note"]]
+        out = pd.DataFrame([req_to_row(r) for r in rows], columns=HEADERS)
         st.download_button("📥 تحميل كل الطلبات CSV", out.to_csv(index=False).encode("utf-8-sig"),
                            file_name="requests.csv", mime="text/csv", key="rqa_dl")
 
+
+def admin_dashboard_ui():
+    rows = list_requests(limit=5000)
+    if not rows:
+        st.markdown('<div class="rq-empty">لسه مفيش طلبات.</div>', unsafe_allow_html=True)
+        return
+    today = datetime.now(KSA_TZ).date()
+    today_s, month_s = today.isoformat(), today.strftime("%Y-%m")
+    pend = [r for r in rows if r["status"] == "pending"]
+    month_rows = [r for r in rows if str(r["created_at"])[:7] == month_s]
+    adv_ok = sum((r.get("amount") or 0) for r in month_rows if r["kind"] == "advance" and r["status"] == "approved")
+    leave_ok = sum((req_days(r) or 0) for r in month_rows if r["kind"] == "leave" and r["status"] == "approved")
+
+    kpi_row([
+        ("⏳ قيد المراجعة", len(pend), "محتاجة قرار", "#f59e0b"),
+        ("🆕 طلبات النهاردة", sum(1 for r in rows if str(r["created_at"])[:10] == today_s), today_s, "#2563eb"),
+        ("📅 طلبات الشهر ده", len(month_rows), month_s, "#0f172a"),
+        ("⚡ متوسط وقت الرد", avg_response_text(rows), "من الإرسال للقرار", "#16a34a"),
+    ])
+    kpi_row([
+        ("✅ موافق عليها (الشهر)", sum(1 for r in month_rows if r["status"] == "approved"), "كل الأنواع", "#16a34a"),
+        ("❌ مرفوضة (الشهر)", sum(1 for r in month_rows if r["status"] == "rejected"), "كل الأنواع", "#dc2626"),
+        ("💵 سلف معتمدة (الشهر)", f"{adv_ok:,.0f}", "ريال", KIND_COLOR["advance"]),
+        ("🌴 أيام إجازة معتمدة (الشهر)", leave_ok, "يوم", KIND_COLOR["leave"]),
+    ])
+
+    admin_section("📈 الطلبات آخر 14 يوم")
+    days = [today - timedelta(days=i) for i in range(13, -1, -1)]
+    cnt = {k: {d.isoformat(): 0 for d in days} for k in KINDS}
+    for r in rows:
+        dd = str(r["created_at"])[:10]
+        if dd in cnt.get(r["kind"], {}):
+            cnt[r["kind"]][dd] += 1
+    chart_df = pd.DataFrame({KIND_AR[k]: [cnt[k][d.isoformat()] for d in days] for k in KINDS},
+                            index=[d.strftime("%m-%d") for d in days])
+    try:
+        st.bar_chart(chart_df, color=[KIND_COLOR[k] for k in KINDS])
+    except Exception:
+        st.bar_chart(chart_df)
+
+    admin_section("🏅 أكتر المناديب طلبًا")
+    counter = Counter(str(r["rider_id"]) for r in rows)
+    names = {}
+    for r in rows:
+        names.setdefault(str(r["rider_id"]), r.get("rider_name") or "—")
+    top = pd.DataFrame([{"المندوب": names[k], "ID": k, "عدد الطلبات": v,
+                         "سلف": sum(1 for r in rows if str(r["rider_id"]) == k and r["kind"] == "advance"),
+                         "إجازات": sum(1 for r in rows if str(r["rider_id"]) == k and r["kind"] == "leave"),
+                         "إنترنت": sum(1 for r in rows if str(r["rider_id"]) == k and r["kind"] == "internet")}
+                        for k, v in counter.most_common(8)])
+    st.dataframe(top, use_container_width=True, hide_index=True)
+
+    admin_section("🕒 آخر 10 طلبات")
+    st.dataframe(pd.DataFrame([req_to_row(r) for r in rows[:10]], columns=HEADERS),
+                 use_container_width=True, hide_index=True)
+
+
+def admin_rider_history_ui():
+    rows = list_requests(limit=5000)
+    perf = perf_map()
+    by_rider = {}
+    for r in rows:
+        by_rider.setdefault(str(r["rider_id"]), []).append(r)
+
+    q = st.text_input("🔎 ابحث برقم المندوب أو اسمه", key="rh_q").strip().lower()
+    pool = set(by_rider) | (set(perf) if q else set())
+    options = {}
+    for rid in pool:
+        name = (perf.get(rid, {}).get("rider_name") or (by_rider.get(rid) or [{}])[0].get("rider_name") or "")
+        if q and q not in rid.lower() and q not in str(name).lower():
+            continue
+        options[(str(name) or "—") + " · " + rid] = rid
+    if not options:
+        st.markdown('<div class="rq-empty">مفيش مناديب مطابقين.</div>', unsafe_allow_html=True)
+        return
+    pick = st.selectbox("المندوب", sorted(options.keys()), key="rh_pick")
+    rid = options[pick]
+    mine = by_rider.get(rid, [])
+    p = perf.get(rid)
+
+    seg = str((p or {}).get("segment") or "—")
+    name = (p or {}).get("rider_name") or (mine[0].get("rider_name") if mine else "") or "—"
+    st.markdown(
+        '<div class="adm-rider-head"><b>' + html.escape(str(name)) + '</b><br><small>ID ' + html.escape(rid)
+        + ' · Segment ' + html.escape(seg) + ' · طلبات: ' + html.escape(fmt_int((p or {}).get("orders")))
+        + ' · On-Time: ' + html.escape(fmt_pct((p or {}).get("on_time_rate"))) + "</small></div>",
+        unsafe_allow_html=True)
+
+    adv_ok = sum((r.get("amount") or 0) for r in mine if r["kind"] == "advance" and r["status"] == "approved")
+    lv_ok = sum((req_days(r) or 0) for r in mine if r["kind"] == "leave" and r["status"] == "approved")
+    kpi_row([
+        ("📨 إجمالي الطلبات", len(mine), "في السجل", "#0f172a"),
+        ("⏳ قيد المراجعة", sum(1 for r in mine if r["status"] == "pending"), "", "#f59e0b"),
+        ("💵 سلف معتمدة", f"{adv_ok:,.0f}", "ريال", KIND_COLOR["advance"]),
+        ("🌴 إجازات معتمدة", lv_ok, "يوم", KIND_COLOR["leave"]),
+    ])
+
+    admin_section("🗓 السجل الكامل (الأحدث أولًا)")
+    if not mine:
+        st.markdown('<div class="rq-empty">المندوب ده معملش أي طلبات لسه.</div>', unsafe_allow_html=True)
+        return
+    for r in mine:
+        st.markdown(request_card(r, AR_ADMIN["kind"][r["kind"]], AR_ADMIN["status"][r["status"]],
+                                 AR_ADMIN["labels"], admin=False, rtl=True), unsafe_allow_html=True)
+    st.download_button("📥 تحميل سجل المندوب CSV",
+                       pd.DataFrame([req_to_row(r) for r in mine], columns=HEADERS).to_csv(index=False).encode("utf-8-sig"),
+                       file_name="rider_" + rid + "_requests.csv", mime="text/csv", key="rh_dl")
+
+
+def gs_setup_help():
+    with st.expander("📘 إزاي أفعّل الربط مع Google Sheet (مرة واحدة)", expanded=not gs_enabled()):
+        st.markdown(
+            """
+1. روح **Google Cloud Console** ← اعمل مشروع ← فعّل **Google Sheets API**.
+2. من **IAM & Admin ← Service Accounts** اعمل Service Account ← **Keys ← Add key ← JSON** وحمّل الملف.
+3. اعمل Google Sheet فاضي، وافتح **Share** وادّي إيميل الـ Service Account (`client_email` اللي في الملف) صلاحية **Editor**.
+4. خد الـ ID من رابط الشيت: `docs.google.com/spreadsheets/d/`**`ID`**`/edit`.
+5. في Streamlit Cloud ← **Settings ← Secrets** حط الآتي (انسخ القيم من ملف الـ JSON):
+            """
+        )
+        st.code(
+            'REQUESTS_SHEET_ID = "ضع هنا ID الشيت"\n'
+            '# ADMIN_PASSWORD = "باسورد الأدمن (اختياري)"\n\n'
+            "[gcp_service_account]\n"
+            'type = "service_account"\n'
+            'project_id = "..."\n'
+            'private_key_id = "..."\n'
+            'private_key = "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"\n'
+            'client_email = "xxx@xxx.iam.gserviceaccount.com"\n'
+            'client_id = "..."\n'
+            'token_uri = "https://oauth2.googleapis.com/token"',
+            language="toml")
+        st.markdown("6. أضف في `requirements.txt` السطرين: `gspread` و `google-auth` ثم Reboot للتطبيق.")
+
+
+def admin_sheet_ui():
+    gs_setup_help()
+    if not gs_enabled():
+        st.warning("الربط غير مفعّل لسه. أضف الـ Secrets زي الشرح فوق.")
+        return
+
+    sid = str(st.secrets["REQUESTS_SHEET_ID"])
+    try:
+        email = st.secrets["gcp_service_account"].get("client_email", "")
+    except Exception:
+        email = ""
+    st.markdown(
+        '<div class="adm-panel">📄 <a href="https://docs.google.com/spreadsheets/d/' + html.escape(sid)
+        + '" target="_blank">افتح Google Sheet</a><br><small>الإيميل اللي لازم يكون Editor على الشيت: <code>'
+        + html.escape(email) + "</code></small></div>", unsafe_allow_html=True)
+
+    unsynced = count_unsynced()
+    kpi_row([("🔄 مش متزامن", unsynced, "طلبات محتاجة رفع", "#f59e0b" if unsynced else "#16a34a"),
+             ("📨 إجمالي الطلبات", len(list_requests(limit=100000)), "في قاعدة البيانات", "#0f172a")])
+
+    c1, c2, c3 = st.columns(3)
+    if c1.button("🔌 اختبار الاتصال", use_container_width=True):
+        try:
+            _gs_ws.clear()
+            ws = _gs_ws()
+            st.success("متصل ✅ — عدد الطلبات الحالية في الشيت: " + str(max(len(ws.col_values(1)) - 1, 0)))
+        except Exception as ex:
+            st.error(type(ex).__name__ + ": " + str(ex)[:250])
+            st.caption("اتأكد إن الشيت متشير مع إيميل الـ Service Account بصلاحية Editor، وإن الـ ID صح.")
+    if c2.button("⬆️ ارفع غير المتزامن (" + str(unsynced) + ")", use_container_width=True, disabled=unsynced == 0):
+        try:
+            with st.spinner("..."):
+                ok_n, fail_n = gs_push_unsynced()
+            (st.success if not fail_n else st.warning)("تم رفع " + str(ok_n) + " وفشل " + str(fail_n))
+        except Exception as ex:
+            st.error(type(ex).__name__ + ": " + str(ex)[:250])
+    if c3.button("🔄 مزامنة كاملة (مسح الشيت وإعادة الكتابة)", use_container_width=True):
+        try:
+            with st.spinner("..."):
+                n = gs_push_all()
+            st.success("اتكتب " + str(n) + " طلب في الشيت.")
+        except Exception as ex:
+            st.error(type(ex).__name__ + ": " + str(ex)[:250])
+    st.caption("ملحوظة: لو سيرفر Streamlit عمل ريستارت وقاعدة البيانات اتمسحت، الطلبات بترجع تلقائي من الشيت.")
+
+
+# ------------------------------------------------------------
+# Rider page
+# ------------------------------------------------------------
 if page == "Rider Performance":
     lang_name = st.radio("Language", list(LANGS.keys()), horizontal=True,
                          key="lang", label_visibility="collapsed")
@@ -1188,10 +1836,28 @@ else:
     if not admin_login():
         st.stop()
 
-    st.title("⚙️ Performance Admin")
+    st.markdown("<style>.block-container {max-width: 1200px;}</style>", unsafe_allow_html=True)
+
     _pend = count_requests("pending")
-    tab_upload, tab_data, tab_req = st.tabs(["📥 Upload", "📊 Current Data",
-                                             "📨 Requests" + (" (" + str(_pend) + ")" if _pend else "")])
+    admin_banner(_pend)
+
+    tab_req, tab_dash, tab_rider, tab_upload, tab_data, tab_sheet = st.tabs([
+        "📨 الطلبات" + (" (" + str(_pend) + ")" if _pend else ""),
+        "📈 لوحة المتابعة",
+        "👤 سجل مندوب",
+        "📥 رفع الشيت",
+        "📊 البيانات الحالية",
+        "🔗 Google Sheet",
+    ])
+
+    with tab_req:
+        admin_requests_ui()
+
+    with tab_dash:
+        admin_dashboard_ui()
+
+    with tab_rider:
+        admin_rider_history_ui()
 
     with tab_upload:
         st.info("⚠️ أي رفع جديد هيمسح كل البيانات القديمة ويحط الملف الجديد مكانها.")
@@ -1263,5 +1929,5 @@ else:
                 use_container_width=True,
             )
 
-    with tab_req:
-        admin_requests_ui()
+    with tab_sheet:
+        admin_sheet_ui()
