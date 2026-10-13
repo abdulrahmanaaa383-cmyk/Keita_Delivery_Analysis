@@ -4,8 +4,10 @@ import re
 import sqlite3
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
+from io import BytesIO
 from pathlib import Path
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -13,8 +15,7 @@ import streamlit.components.v1 as components
 # ============================================================
 # RIDER PERFORMANCE PORTAL (simplified + flexible)
 # - كل رفع جديد بيمسح البيانات القديمة بالكامل
-# - بيحتاج 11 عمود بس، وبيتعرف عليهم تلقائيًا أو تختارهم يدوي
-# - نظام الطلبات (إنترنت / سلفة / إجازة) متربط بـ Google Sheet تلقائي
+# - نظام الطلبات (إنترنت / سلفة / إجازة) + داش بورد أدمن + تصدير Excel يومي
 # ============================================================
 
 st.set_page_config(page_title="Rider Performance", page_icon="🏆", layout="centered")
@@ -294,7 +295,8 @@ st.markdown("""
     .rq-detail {margin-top:8px; font-size:17px; font-weight:700; color:#0f172a;}
     .rq-note {margin-top:6px; color:#475569; font-size:13px;}
     .rq-anote {margin-top:8px; background:#f1f5f9; border-radius:12px; padding:8px 12px; font-size:13px; color:#334155;}
-    .rq-meta {margin-top:8px; font-size:11px; color:#94a3b8; font-weight:600;}
+    .rq-meta {margin-top:8px; font-size:12px; color:#64748b; font-weight:700; display:flex; gap:8px; flex-wrap:wrap;}
+    .rq-meta span {background:#f1f5f9; border-radius:8px; padding:2px 9px;}
     .rq-empty {text-align:center; color:#94a3b8; padding:22px; background:#f8fafc; border:1px dashed #cbd5e1; border-radius:16px;}
     .rq-admin {direction:rtl; text-align:right;}
     .rq-kpis {display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; margin-bottom:14px; direction:rtl;}
@@ -321,6 +323,7 @@ st.markdown("""
     .adm-rider-head {direction:rtl; text-align:right; background:linear-gradient(145deg,#0f172a,#1e293b); color:#fff;
                      border-radius:20px; padding:20px 24px; margin:10px 0 14px;}
     .adm-rider-head b {font-size:22px;} .adm-rider-head small {color:#cbd5e1; font-weight:600;}
+    .adm-result {direction:rtl; text-align:right; color:#475569; font-weight:700; font-size:13px; margin:4px 0 10px;}
     .ctx {display:flex; gap:6px; flex-wrap:wrap; margin-top:10px;}
     .ctx-chip {background:color-mix(in srgb, var(--b,#64748b) 12%, white); color:var(--b,#334155);
                border:1px solid color-mix(in srgb, var(--b,#64748b) 35%, white);
@@ -792,14 +795,18 @@ def render_target_status(d, M):
 
 # ============================================================
 # 📨 نظام الطلبات: إنترنت / سلفة / إجازة
-# المندوب يبعت من صفحته، والأدمن يشوفها ويوافق أو يرفض من تاب الطلبات
-# وكل طلب جديد/تغيير حالة بيتبعت تلقائي لـ Google Sheet
+# كل طلب بيتسجل بتاريخ ووقت (توقيت السعودية) وبيظهر عند المندوب والأدمن
 # ============================================================
 KINDS = ["internet", "advance", "leave"]
 KIND_ICON = {"internet": "🌐", "advance": "💵", "leave": "🌴"}
 KIND_COLOR = {"internet": "#0ea5e9", "advance": "#8b5cf6", "leave": "#14b8a6"}
 STATUS_COLOR = {"pending": "#f59e0b", "approved": "#16a34a", "rejected": "#dc2626", "cancelled": "#64748b"}
 KSA_TZ = timezone(timedelta(hours=3))
+
+KIND_AR = {"internet": "إنترنت", "advance": "سلفة", "leave": "إجازة"}
+KIND_AR_REV = {v: k for k, v in KIND_AR.items()}
+STATUS_AR = {"pending": "قيد المراجعة", "approved": "تمت الموافقة", "rejected": "مرفوض", "cancelled": "ملغي"}
+STATUS_AR_REV = {v: k for k, v in STATUS_AR.items()}
 
 REQ = {
     "en": {
@@ -892,223 +899,10 @@ AR_ADMIN = {
     "labels": {"sar": "ريال", "days": "يوم", "admin_note": "ملاحظة الإدارة"},
 }
 
-# ------------------------------------------------------------
-# Google Sheets: أي طلب جديد أو تغيير حالة بيتكتب في الشيت تلقائي
-# ------------------------------------------------------------
-SHEET_TAB = "Requests"
-SUMMARY_TAB = "Summary"
+# أعمدة جدول الطلبات (نفس الترتيب في الشاشة وفي ملف Excel)
 HEADERS = ["رقم الطلب", "التاريخ", "الوقت", "رقم المندوب", "اسم المندوب", "نوع الطلب", "التفاصيل",
            "المبلغ (ريال)", "رقم الجوال", "من تاريخ", "إلى تاريخ", "عدد الأيام", "ملاحظة المندوب",
            "الحالة", "ملاحظة الإدارة", "آخر تحديث"]
-LAST_COL = "P"  # آخر عمود (16 عمود)
-KIND_AR = {"internet": "إنترنت", "advance": "سلفة", "leave": "إجازة"}
-KIND_AR_REV = {v: k for k, v in KIND_AR.items()}
-STATUS_AR = {"pending": "قيد المراجعة", "approved": "تمت الموافقة", "rejected": "مرفوض", "cancelled": "ملغي"}
-STATUS_AR_REV = {v: k for k, v in STATUS_AR.items()}
-
-
-def gs_enabled():
-    try:
-        return "gcp_service_account" in st.secrets and "REQUESTS_SHEET_ID" in st.secrets
-    except Exception:
-        return False
-
-
-def _gs_style(sh, ws):
-    try:
-        ws.format(f"A1:{LAST_COL}1", {
-            "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
-            "backgroundColor": {"red": 0.06, "green": 0.09, "blue": 0.16},
-            "horizontalAlignment": "CENTER",
-        })
-        ws.freeze(rows=1)
-        ws.set_basic_filter()
-        sh.batch_update({"requests": [{"updateSheetProperties": {
-            "properties": {"sheetId": ws.id, "rightToLeft": True}, "fields": "rightToLeft"}}]})
-    except Exception:
-        pass
-
-
-def _gs_summary(sh):
-    """تاب Summary فيه عدّادات جاهزة بالمعادلات (بيتعمل مرة واحدة)."""
-    import gspread
-    try:
-        sh.worksheet(SUMMARY_TAB)
-        return
-    except gspread.exceptions.WorksheetNotFound:
-        pass
-    try:
-        ws = sh.add_worksheet(title=SUMMARY_TAB, rows=20, cols=7)
-        statuses = list(STATUS_AR.values())
-        rows = [["النوع"] + statuses + ["الإجمالي"]]
-        for i, k in enumerate(KINDS, start=2):
-            row = [KIND_AR[k]]
-            for j in range(len(statuses)):
-                col = chr(ord("B") + j)
-                row.append(f"=COUNTIFS({SHEET_TAB}!$F:$F,$A{i},{SHEET_TAB}!$N:$N,{col}$1)")
-            row.append(f"=SUM(B{i}:E{i})")
-            rows.append(row)
-        rows.append(["الإجمالي"] + [f"=SUM({chr(ord('B') + j)}2:{chr(ord('B') + j)}4)" for j in range(5)])
-        rows.append([])
-        rows.append(["إجمالي السلف الموافق عليها (ريال)",
-                     f'=SUMIFS({SHEET_TAB}!$H:$H,{SHEET_TAB}!$F:$F,"سلفة",{SHEET_TAB}!$N:$N,"تمت الموافقة")'])
-        rows.append(["إجمالي أيام الإجازات الموافق عليها",
-                     f'=SUMIFS({SHEET_TAB}!$L:$L,{SHEET_TAB}!$F:$F,"إجازة",{SHEET_TAB}!$N:$N,"تمت الموافقة")'])
-        ws.update(range_name="A1", values=rows, value_input_option="USER_ENTERED")
-        ws.format("A1:F1", {"textFormat": {"bold": True}, "horizontalAlignment": "CENTER"})
-        sh.batch_update({"requests": [{"updateSheetProperties": {
-            "properties": {"sheetId": ws.id, "rightToLeft": True}, "fields": "rightToLeft"}}]})
-    except Exception:
-        pass
-
-
-@st.cache_resource(show_spinner=False, ttl=1800)
-def _gs_ws():
-    import gspread
-    from google.oauth2.service_account import Credentials
-
-    info = dict(st.secrets["gcp_service_account"])
-    if "private_key" in info:
-        info["private_key"] = info["private_key"].replace("\\n", "\n")
-    creds = Credentials.from_service_account_info(
-        info, scopes=["https://www.googleapis.com/auth/spreadsheets"])
-    gc = gspread.authorize(creds)
-    sh = gc.open_by_key(str(st.secrets["REQUESTS_SHEET_ID"]))
-    try:
-        ws = sh.worksheet(SHEET_TAB)
-    except gspread.exceptions.WorksheetNotFound:
-        ws = sh.add_worksheet(title=SHEET_TAB, rows=2000, cols=len(HEADERS))
-    if not ws.row_values(1):
-        ws.update(range_name="A1", values=[HEADERS])
-        _gs_style(sh, ws)
-    _gs_summary(sh)
-    return ws
-
-
-def req_days(r):
-    try:
-        return (date.fromisoformat(r["date_to"]) - date.fromisoformat(r["date_from"])).days + 1
-    except Exception:
-        return None
-
-
-def req_to_row(r):
-    created = str(r.get("created_at") or "")
-    d_part, _, t_part = created.partition(" ")
-    kind = r["kind"]
-    days = (req_days(r) or "") if kind == "leave" else ""
-    if kind == "internet":
-        detail = r.get("phone") or ""
-    elif kind == "advance":
-        detail = f"{(r.get('amount') or 0):,.0f} ريال"
-    else:
-        detail = f"{r.get('date_from') or ''} → {r.get('date_to') or ''} ({days} يوم)"
-    return [
-        int(r["id"]), d_part, t_part, str(r["rider_id"]), r.get("rider_name") or "",
-        KIND_AR.get(kind, kind), detail,
-        float(r["amount"]) if kind == "advance" and r.get("amount") is not None else "",
-        (r.get("phone") or "") if kind == "internet" else "",
-        (r.get("date_from") or "") if kind == "leave" else "",
-        (r.get("date_to") or "") if kind == "leave" else "",
-        days, r.get("note") or "", STATUS_AR.get(r["status"], r["status"]),
-        r.get("admin_note") or "", r.get("updated_at") or "",
-    ]
-
-
-def _mark_synced(ids, value=1):
-    conn = get_conn()
-    conn.executemany("UPDATE requests SET gs_synced = ? WHERE id = ?", [(value, int(i)) for i in ids])
-    conn.commit()
-    conn.close()
-
-
-def gs_push(req_id):
-    """يكتب/يحدّث صف الطلب في الشيت. بيرجّع (نجح؟, رسالة)."""
-    if not gs_enabled():
-        return False, "Google Sheet غير مفعّل"
-    r = get_request(req_id)
-    if not r:
-        return False, "الطلب غير موجود"
-    try:
-        ws = _gs_ws()
-        row = req_to_row(r)
-        ids = ws.col_values(1)
-        key = str(r["id"])
-        if key in ids:
-            pos = ids.index(key) + 1
-            ws.update(range_name=f"A{pos}:{LAST_COL}{pos}", values=[row], value_input_option="RAW")
-        else:
-            ws.append_row(row, value_input_option="RAW", table_range="A1")
-        _mark_synced([r["id"]])
-        return True, ""
-    except Exception as ex:
-        return False, f"{type(ex).__name__}: {str(ex)[:160]}"
-
-
-def gs_push_all():
-    """مزامنة كاملة: يمسح الشيت ويكتب كل الطلبات من الأول."""
-    ws = _gs_ws()
-    rows = sorted(list_requests(limit=100000), key=lambda x: x["id"])
-    ws.clear()
-    ws.update(range_name="A1", values=[HEADERS] + [req_to_row(r) for r in rows], value_input_option="RAW")
-    _gs_style(ws.spreadsheet, ws)
-    _mark_synced([r["id"] for r in rows])
-    return len(rows)
-
-
-def count_unsynced():
-    try:
-        init_requests_db()
-        conn = get_conn()
-        n = conn.execute("SELECT COUNT(*) FROM requests WHERE COALESCE(gs_synced,0) = 0").fetchone()[0]
-        conn.close()
-        return int(n)
-    except Exception:
-        return 0
-
-
-def gs_push_unsynced():
-    conn = get_conn()
-    ids = [x[0] for x in conn.execute("SELECT id FROM requests WHERE COALESCE(gs_synced,0) = 0 ORDER BY id").fetchall()]
-    conn.close()
-    if len(ids) > 10:
-        return gs_push_all(), 0
-    ok_n = 0
-    for i in ids:
-        ok, _ = gs_push(i)
-        ok_n += 1 if ok else 0
-    return ok_n, len(ids) - ok_n
-
-
-def gs_restore():
-    """لو قاعدة البيانات المحلية اتمسحت (ريستارت للسيرفر)، نرجّع الطلبات من الشيت."""
-    ws = _gs_ws()
-    vals = ws.get_all_values()[1:]
-    conn = get_conn()
-    n = 0
-    for v in vals:
-        v = (list(v) + [""] * len(HEADERS))[:len(HEADERS)]
-        try:
-            rid = int(v[0])
-        except Exception:
-            continue
-        kind = KIND_AR_REV.get(v[5])
-        if not kind:
-            continue
-        try:
-            amount = float(str(v[7]).replace(",", "")) if str(v[7]).strip() else None
-        except Exception:
-            amount = None
-        conn.execute(
-            """INSERT OR IGNORE INTO requests (id, rider_id, rider_name, kind, amount, phone, date_from, date_to,
-                   note, status, admin_note, created_at, updated_at, lang, gs_synced)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)""",
-            (rid, v[3], v[4], kind, amount, v[8] or None, v[9] or None, v[10] or None, v[12],
-             STATUS_AR_REV.get(v[13], "pending"), v[14], f"{v[1]} {v[2]}".strip(), v[15] or v[1], "ar"))
-        n += 1
-    conn.commit()
-    conn.close()
-    return n
 
 
 # ------------------------------------------------------------
@@ -1122,34 +916,19 @@ def init_requests_db():
             rider_id TEXT NOT NULL, rider_name TEXT, kind TEXT NOT NULL,
             amount REAL, phone TEXT, date_from TEXT, date_to TEXT, note TEXT,
             status TEXT NOT NULL DEFAULT 'pending', admin_note TEXT,
-            created_at TEXT NOT NULL, updated_at TEXT, lang TEXT,
-            gs_synced INTEGER DEFAULT 0
+            created_at TEXT NOT NULL, updated_at TEXT, lang TEXT
         )
     """)
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(requests)").fetchall()]
-    if "gs_synced" not in cols:  # ترقية قاعدة قديمة
-        conn.execute("ALTER TABLE requests ADD COLUMN gs_synced INTEGER DEFAULT 0")
     conn.commit()
     conn.close()
 
 
-@st.cache_resource(show_spinner=False)
-def _restore_once():
-    """بيشتغل مرة واحدة لكل تشغيل للسيرفر: لو مفيش طلبات محلية والشيت فيه طلبات، يرجّعها."""
-    try:
-        init_requests_db()
-        conn = get_conn()
-        n = conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
-        conn.close()
-        if n == 0 and gs_enabled():
-            gs_restore()
-    except Exception:
-        pass
-    return True
-
-
 def now_ksa():
     return datetime.now(KSA_TZ).strftime("%Y-%m-%d %H:%M")
+
+
+def today_ksa():
+    return datetime.now(KSA_TZ).date()
 
 
 def get_request(req_id):
@@ -1162,26 +941,21 @@ def get_request(req_id):
 
 
 def add_request(rider_id, rider_name, kind, amount=None, phone=None, date_from=None, date_to=None, note="", lang="en"):
-    _restore_once()
     init_requests_db()
     conn = get_conn()
+    stamp = now_ksa()  # تاريخ + وقت الطلب بتوقيت السعودية، بيتسجل تلقائي مع كل طلب
     cur = conn.execute(
         """INSERT INTO requests (rider_id, rider_name, kind, amount, phone, date_from, date_to, note,
-                                 status, created_at, updated_at, lang, gs_synced)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, 0)""",
-        (str(rider_id), rider_name, kind, amount, phone, date_from, date_to, note, now_ksa(), now_ksa(), lang))
+                                 status, created_at, updated_at, lang)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)""",
+        (str(rider_id), rider_name, kind, amount, phone, date_from, date_to, note, stamp, stamp, lang))
     conn.commit()
     new_id = cur.lastrowid
     conn.close()
-    try:
-        gs_push(new_id)  # لو فشل، الطلب محفوظ محليًا وبيتزامن بعدين من تاب Google Sheet
-    except Exception:
-        pass
     return new_id
 
 
 def list_requests(rider_id=None, status=None, kind=None, limit=500):
-    _restore_once()
     init_requests_db()
     q, params = "SELECT * FROM requests WHERE 1=1", []
     if rider_id:
@@ -1206,20 +980,14 @@ def update_request(req_id, status, admin_note=None):
     """admin_note=None معناها سيب الملاحظة زي ما هي."""
     conn = get_conn()
     conn.execute(
-        "UPDATE requests SET status = ?, admin_note = COALESCE(?, admin_note), updated_at = ?, gs_synced = 0 WHERE id = ?",
+        "UPDATE requests SET status = ?, admin_note = COALESCE(?, admin_note), updated_at = ? WHERE id = ?",
         (status, None if admin_note is None else admin_note.strip(), now_ksa(), int(req_id)))
     conn.commit()
     conn.close()
-    ok, err = gs_push(req_id)
-    if gs_enabled() and not ok:
-        st.session_state["flash"] = ("warning", "اتحفظ التغيير، بس مزامنة Google Sheet فشلت (" + err + "). "
-                                     "تقدر تعيد المزامنة من تاب Google Sheet.")
-    return ok
 
 
 def count_requests(status="pending"):
     try:
-        _restore_once()
         init_requests_db()
         conn = get_conn()
         n = conn.execute("SELECT COUNT(*) FROM requests WHERE status = ?", (status,)).fetchone()[0]
@@ -1246,6 +1014,13 @@ def leave_overlap(rider_id, d_from, d_to):
     return False
 
 
+def req_days(r):
+    try:
+        return (date.fromisoformat(r["date_to"]) - date.fromisoformat(r["date_from"])).days + 1
+    except Exception:
+        return None
+
+
 def detail_text(r, labels):
     if r["kind"] == "internet":
         return "📱 " + (r.get("phone") or "—")
@@ -1269,13 +1044,18 @@ def request_card(r, kind_label, status_label, labels, admin=False, ctx="", rtl=N
     anote = ""
     if r.get("admin_note"):
         anote = '<div class="rq-anote"><b>' + e(labels["admin_note"]) + ":</b> " + e(r["admin_note"]) + "</div>"
+    created = str(r.get("created_at") or "")
+    d_part, _, t_part = created.partition(" ")
+    meta = '<span>#' + str(r["id"]) + '</span><span>📅 ' + e(d_part) + '</span><span>🕒 ' + e(t_part) + "</span>"
+    if r["status"] != "pending" and r.get("updated_at") and r["updated_at"] != created:
+        meta += '<span>↻ ' + e(str(r["updated_at"])) + "</span>"
     cls = "rq-card rq-admin" if rtl else "rq-card"
     return (
         '<div class="' + cls + '" style="--c:' + color + '">'
         '<div class="rq-head"><span class="rq-kind">' + e(kind_label) + '</span>'
         '<span class="rq-badge" style="--b:' + bcolor + '">' + e(status_label) + "</span></div>"
         + who + '<div class="rq-detail">' + e(detail_text(r, labels)) + "</div>" + note + ctx + anote +
-        '<div class="rq-meta">#' + str(r["id"]) + " · " + e(r["created_at"]) + "</div></div>"
+        '<div class="rq-meta">' + meta + "</div></div>"
     )
 
 
@@ -1336,14 +1116,13 @@ def render_requests_page(d, lang):
         elif has_pending(rid, kind):
             st.warning(R["dup"])
         else:
-            with st.spinner("..."):
-                new_id = add_request(
-                    rid, name, kind,
-                    amount=float(amount) if kind == "advance" else None,
-                    phone=(phone or "").strip() if kind == "internet" else None,
-                    date_from=d_from.isoformat() if d_from else None,
-                    date_to=d_to.isoformat() if d_to else None,
-                    note=(note or "").strip(), lang=lang)
+            new_id = add_request(
+                rid, name, kind,
+                amount=float(amount) if kind == "advance" else None,
+                phone=(phone or "").strip() if kind == "internet" else None,
+                date_from=d_from.isoformat() if d_from else None,
+                date_to=d_to.isoformat() if d_to else None,
+                note=(note or "").strip(), lang=lang)
             st.success(R["ok"].format(n=new_id))
 
     st.markdown('<div class="section-title">' + e(R["my_title"]) + "</div>", unsafe_allow_html=True)
@@ -1362,7 +1141,144 @@ def render_requests_page(d, lang):
 
 
 # ============================================================
-# 🛠 واجهة الأدمن (احترافية)
+# 📤 Excel: تصدير منسّق (هيدر، فلتر، تجميد، ألوان حالة، اتجاه يمين لشمال)
+# ============================================================
+def req_to_row(r):
+    created = str(r.get("created_at") or "")
+    d_part, _, t_part = created.partition(" ")
+    kind = r["kind"]
+    days = (req_days(r) or "") if kind == "leave" else ""
+    if kind == "internet":
+        detail = r.get("phone") or ""
+    elif kind == "advance":
+        detail = f"{(r.get('amount') or 0):,.0f} ريال"
+    else:
+        detail = f"{r.get('date_from') or ''} → {r.get('date_to') or ''} ({days} يوم)"
+    return [
+        int(r["id"]), d_part, t_part, str(r["rider_id"]), r.get("rider_name") or "",
+        KIND_AR.get(kind, kind), detail,
+        float(r["amount"]) if kind == "advance" and r.get("amount") is not None else None,
+        (r.get("phone") or "") if kind == "internet" else "",
+        (r.get("date_from") or "") if kind == "leave" else "",
+        (r.get("date_to") or "") if kind == "leave" else "",
+        days, r.get("note") or "", STATUS_AR.get(r["status"], r["status"]),
+        r.get("admin_note") or "", r.get("updated_at") or "",
+    ]
+
+
+def requests_df(rows, perf=None, for_excel=False):
+    df = pd.DataFrame([req_to_row(r) for r in rows], columns=HEADERS)
+    if perf is not None:
+        df["السيجمنت"] = [str((perf.get(str(r["rider_id"])) or {}).get("segment") or "") for r in rows]
+    if for_excel:
+        for c in ("التاريخ", "من تاريخ", "إلى تاريخ"):
+            df[c] = pd.to_datetime(df[c], errors="coerce").dt.date
+    return df
+
+
+def daily_summary_df(rows):
+    cols = ["التاريخ", "إجمالي الطلبات", "إنترنت", "سلفة", "إجازة", "قيد المراجعة", "تمت الموافقة",
+            "مرفوض", "ملغي", "سلف مطلوبة (ريال)", "سلف معتمدة (ريال)", "أيام إجازة معتمدة"]
+    agg = {}
+    for r in rows:
+        d = str(r["created_at"])[:10]
+        a = agg.setdefault(d, {c: 0 for c in cols})
+        a["التاريخ"] = d
+        a["إجمالي الطلبات"] += 1
+        a[KIND_AR[r["kind"]]] += 1
+        a[STATUS_AR[r["status"]]] += 1
+        if r["kind"] == "advance":
+            if r["status"] not in ("cancelled", "rejected"):
+                a["سلف مطلوبة (ريال)"] += r.get("amount") or 0
+            if r["status"] == "approved":
+                a["سلف معتمدة (ريال)"] += r.get("amount") or 0
+        if r["kind"] == "leave" and r["status"] == "approved":
+            a["أيام إجازة معتمدة"] += req_days(r) or 0
+    df = pd.DataFrame(list(agg.values()), columns=cols)
+    return df.sort_values("التاريخ", ascending=False).reset_index(drop=True) if not df.empty else df
+
+
+def to_excel_bytes(sheets):
+    """sheets: {اسم الشيت: DataFrame}"""
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    status_fill = {"قيد المراجعة": "FEF3C7", "تمت الموافقة": "DCFCE7", "مرفوض": "FEE2E2", "ملغي": "E2E8F0"}
+    date_cols = ("التاريخ", "من تاريخ", "إلى تاريخ")
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+        for name, df in sheets.items():
+            name = name[:31]
+            df.to_excel(xw, sheet_name=name, index=False)
+            ws = xw.sheets[name]
+            head_fill = PatternFill("solid", fgColor="0F172A")
+            for c in ws[1]:
+                c.fill = head_fill
+                c.font = Font(bold=True, color="FFFFFF")
+                c.alignment = Alignment(horizontal="center", vertical="center")
+            ws.row_dimensions[1].height = 26
+            headers = [c.value for c in ws[1]]
+            for idx, h in enumerate(headers, start=1):
+                letter = get_column_letter(idx)
+                sample = [len(str(c.value)) for c in ws[letter][1:200] if c.value is not None]
+                ws.column_dimensions[letter].width = min(max([len(str(h))] + sample) + 4, 45)
+                for c in ws[letter][1:]:
+                    c.alignment = Alignment(horizontal="center", vertical="center")
+                    if h in date_cols and c.value:
+                        c.number_format = "yyyy-mm-dd"
+                    if h == "الحالة" and c.value in status_fill:
+                        c.fill = PatternFill("solid", fgColor=status_fill[c.value])
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = ws.dimensions
+            ws.sheet_view.rightToLeft = True
+    return buf.getvalue()
+
+
+def requests_excel(rows, perf):
+    return to_excel_bytes({
+        "الطلبات": requests_df(rows, perf, for_excel=True),
+        "ملخص يومي": daily_summary_df(rows),
+    })
+
+
+def restore_from_excel(file):
+    """يرجّع الطلبات من ملف Excel كنا صدّرناه قبل كده (مفيد لو السيرفر عمل ريستارت)."""
+    df = pd.read_excel(file, sheet_name="الطلبات", dtype=str).fillna("")
+    miss = [h for h in HEADERS if h not in df.columns]
+    if miss:
+        raise ValueError("الملف ناقصه أعمدة: " + "، ".join(miss))
+    init_requests_db()
+    conn = get_conn()
+    n = 0
+    for _, v in df.iterrows():
+        try:
+            rid = int(float(v["رقم الطلب"]))
+        except Exception:
+            continue
+        kind = KIND_AR_REV.get(v["نوع الطلب"])
+        if not kind:
+            continue
+        try:
+            amount = float(str(v["المبلغ (ريال)"]).replace(",", "")) if str(v["المبلغ (ريال)"]).strip() else None
+        except Exception:
+            amount = None
+        created = (str(v["التاريخ"])[:10] + " " + str(v["الوقت"])[:5]).strip()
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO requests (id, rider_id, rider_name, kind, amount, phone, date_from, date_to,
+                   note, status, admin_note, created_at, updated_at, lang)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (rid, str(v["رقم المندوب"]), v["اسم المندوب"], kind, amount, v["رقم الجوال"] or None,
+             (str(v["من تاريخ"])[:10] or None), (str(v["إلى تاريخ"])[:10] or None), v["ملاحظة المندوب"],
+             STATUS_AR_REV.get(v["الحالة"], "pending"), v["ملاحظة الإدارة"], created,
+             v["آخر تحديث"] or created, "ar"))
+        n += cur.rowcount
+    conn.commit()
+    conn.close()
+    return n
+
+
+# ============================================================
+# 🛠 الأدمن: فلاتر + داش بورد + سجل مندوب
 # ============================================================
 def perf_map():
     df = get_all()
@@ -1412,16 +1328,12 @@ def admin_ctx(r, perf, rows):
         chips.append('<span class="ctx-chip" style="--b:' + segment_color(seg) + '">Segment ' + e(seg) + "</span>")
         chips.append('<span class="ctx-chip">📦 ' + e(fmt_int(p.get("orders"))) + " طلب</span>")
         chips.append('<span class="ctx-chip">⏱ On-Time ' + e(fmt_pct(p.get("on_time_rate"))) + "</span>")
-        try:
-            tp, dc = int(p.get("target_per_day") or 0), int(p.get("days_covered") or 0)
-            if tp > 0 and dc > 0:
-                miss = max(tp * dc - int(p.get("orders") or 0), 0)
-                if miss == 0:
-                    chips.append('<span class="ctx-chip" style="--b:#16a34a">🎯 محقق التارجت</span>')
-                else:
-                    chips.append('<span class="ctx-chip" style="--b:#dc2626">🎯 ناقصه ' + str(miss) + " طلب عن التارجت</span>")
-        except Exception:
-            pass
+        miss = target_missing(p)
+        if miss is not None:
+            if miss == 0:
+                chips.append('<span class="ctx-chip" style="--b:#16a34a">🎯 محقق التارجت</span>')
+            else:
+                chips.append('<span class="ctx-chip" style="--b:#dc2626">🎯 ناقصه ' + str(miss) + " طلب عن التارجت</span>")
     else:
         chips.append('<span class="ctx-chip" style="--b:#f59e0b">⚠️ المندوب مش موجود في الشيت الحالي</span>')
 
@@ -1440,77 +1352,175 @@ def admin_ctx(r, perf, rows):
     return '<div class="ctx">' + "".join(chips) + "</div>"
 
 
-def admin_banner(pending):
+def target_missing(p):
+    """عدد الطلبات الناقصة عن التارجت، أو None لو التارجت مش متحدد."""
+    try:
+        tp, dc = int(p.get("target_per_day") or 0), int(p.get("days_covered") or 0)
+        if tp > 0 and dc > 0:
+            return max(tp * dc - int(p.get("orders") or 0), 0)
+    except Exception:
+        pass
+    return None
+
+
+def admin_banner(pending, today_n):
     chips = []
     if pending:
         chips.append('<span class="adm-chip warn">⏳ ' + str(pending) + " طلب قيد المراجعة</span>")
     else:
         chips.append('<span class="adm-chip good">✅ مفيش طلبات معلّقة</span>')
-    if gs_enabled():
-        un = count_unsynced()
-        chips.append('<span class="adm-chip good">🟢 Google Sheet متصل</span>' if un == 0 else
-                     '<span class="adm-chip warn">🟠 ' + str(un) + " طلب مش متزامن</span>")
-    else:
-        chips.append('<span class="adm-chip">⚪ Google Sheet غير مفعّل</span>')
+    chips.append('<span class="adm-chip">🆕 ' + str(today_n) + " طلب النهاردة</span>")
     st.markdown(
         '<div class="adm-banner"><div><div class="adm-title">⚙️ لوحة إدارة المناديب</div>'
         '<div class="adm-sub">' + datetime.now(KSA_TZ).strftime("%Y-%m-%d · %H:%M") + ' (توقيت السعودية)</div></div>'
         '<div class="adm-chips">' + "".join(chips) + "</div></div>", unsafe_allow_html=True)
 
 
-def admin_requests_ui():
-    rows = list_requests(limit=5000)
-    perf = perf_map()
+# ------------------------------------------------------------
+# الفلاتر (بتأثر على الطلبات + لوحة المتابعة + التصدير)
+# ------------------------------------------------------------
+PRESETS = ["الكل", "اليوم", "امبارح", "آخر 7 أيام", "آخر 30 يوم", "الشهر ده", "فترة مخصصة"]
+SORTS = ["الأحدث أولًا", "الأقدم أولًا", "الأعلى مبلغًا", "اسم المندوب"]
 
-    flash = st.session_state.pop("flash", None)
-    if flash:
-        getattr(st, flash[0])(flash[1])
 
+def period_range(preset, custom):
+    today = today_ksa()
+    if preset == "اليوم":
+        return today.isoformat(), today.isoformat()
+    if preset == "امبارح":
+        y = (today - timedelta(days=1)).isoformat()
+        return y, y
+    if preset == "آخر 7 أيام":
+        return (today - timedelta(days=6)).isoformat(), today.isoformat()
+    if preset == "آخر 30 يوم":
+        return (today - timedelta(days=29)).isoformat(), today.isoformat()
+    if preset == "الشهر ده":
+        return today.replace(day=1).isoformat(), today.isoformat()
+    if preset == "فترة مخصصة" and isinstance(custom, (tuple, list)) and len(custom) >= 1:
+        a = custom[0].isoformat()
+        b = (custom[1] if len(custom) > 1 else custom[0]).isoformat()
+        return a, b
+    return None, None
+
+
+def admin_filters(perf):
+    kind_labels = {"🌐 إنترنت": "internet", "💵 سلفة": "advance", "🌴 إجازة": "leave"}
+    status_labels = {"⏳ قيد المراجعة": "pending", "✅ تمت الموافقة": "approved",
+                     "❌ مرفوض": "rejected", "🚫 ملغي": "cancelled"}
+    segs = sorted({str(p.get("segment") or "—") for p in perf.values()})
+
+    with st.expander("🎛 الفلاتر — بتأثر على الطلبات ولوحة المتابعة والتصدير", expanded=True):
+        a1, a2, a3, a4 = st.columns([1.5, 2, 2, 2])
+        preset = a1.selectbox("📅 الفترة (تاريخ الطلب)", PRESETS, key="f_preset")
+        custom = None
+        if preset == "فترة مخصصة":
+            custom = a2.date_input("من - إلى", value=(), key="f_custom")
+        kinds = a3.multiselect("نوع الطلب", list(kind_labels.keys()), key="f_kinds", placeholder="الكل")
+        statuses = a4.multiselect("الحالة", list(status_labels.keys()), key="f_status", placeholder="الكل")
+        b1, b2, b3 = st.columns([3, 2, 2])
+        q = b1.text_input("🔎 بحث (ID / اسم / جوال / ملاحظة / رقم الطلب)", key="f_q").strip().lower()
+        seg_pick = b2.multiselect("السيجمنت", segs, key="f_seg", placeholder="الكل")
+        sort = b3.selectbox("الترتيب", SORTS, key="f_sort")
+        with st.expander("فلاتر متقدمة"):
+            c1, c2, c3 = st.columns(3)
+            amt_min = c1.number_input("مبلغ السلفة من", min_value=0, value=0, step=50, key="f_amin")
+            amt_max = c2.number_input("مبلغ السلفة إلى (0 = بدون حد)", min_value=0, value=0, step=50, key="f_amax")
+            below = c3.checkbox("المناديب الأقل من التارجت فقط", key="f_below")
+            st.caption("فلتر المبلغ بيعرض السلف فقط لما يتفعّل.")
+
+    d1, d2 = period_range(preset, custom)
+    return {
+        "d1": d1, "d2": d2, "kinds": [kind_labels[k] for k in kinds],
+        "statuses": [status_labels[s] for s in statuses], "q": q, "segs": seg_pick, "sort": sort,
+        "amt_min": amt_min, "amt_max": amt_max, "below": below, "preset": preset,
+    }
+
+
+def apply_filters(rows, perf, F):
+    out = []
+    for r in rows:
+        day = str(r["created_at"])[:10]
+        if F["d1"] and not (F["d1"] <= day <= F["d2"]):
+            continue
+        if F["kinds"] and r["kind"] not in F["kinds"]:
+            continue
+        if F["statuses"] and r["status"] not in F["statuses"]:
+            continue
+        rid = str(r["rider_id"])
+        p = perf.get(rid)
+        if F["segs"] and str((p or {}).get("segment") or "—") not in F["segs"]:
+            continue
+        if F["q"]:
+            hay = " ".join([rid, str(r.get("rider_name") or ""), str(r.get("phone") or ""),
+                            str(r.get("note") or ""), str(r["id"])]).lower()
+            if F["q"] not in hay:
+                continue
+        if F["amt_min"] or F["amt_max"]:
+            if r["kind"] != "advance":
+                continue
+            amt = r.get("amount") or 0
+            if amt < F["amt_min"] or (F["amt_max"] and amt > F["amt_max"]):
+                continue
+        if F["below"]:
+            miss = target_missing(p) if p else None
+            if not miss:
+                continue
+        out.append(r)
+
+    if F["sort"] == "الأقدم أولًا":
+        out.sort(key=lambda x: x["id"])
+    elif F["sort"] == "الأعلى مبلغًا":
+        out.sort(key=lambda x: (x.get("amount") or 0), reverse=True)
+    elif F["sort"] == "اسم المندوب":
+        out.sort(key=lambda x: str(x.get("rider_name") or ""))
+    else:
+        out.sort(key=lambda x: x["id"], reverse=True)
+    return out
+
+
+# ------------------------------------------------------------
+# تاب الطلبات
+# ------------------------------------------------------------
+def admin_requests_ui(all_rows, rows, perf):
     pend = [r for r in rows if r["status"] == "pending"]
-    by = lambda k: [r for r in pend if r["kind"] == k]
-    adv_sum = sum((r.get("amount") or 0) for r in by("advance"))
+    adv_sum = sum((r.get("amount") or 0) for r in rows if r["kind"] == "advance" and r["status"] == "pending")
     kpi_row([
-        ("⏳ قيد المراجعة", len(pend), "كل الأنواع", "#f59e0b"),
-        ("🌐 إنترنت", len(by("internet")), "قيد المراجعة", KIND_COLOR["internet"]),
-        ("💵 سلف", len(by("advance")), "إجمالي " + f"{adv_sum:,.0f}" + " ريال", KIND_COLOR["advance"]),
-        ("🌴 إجازات", len(by("leave")), "قيد المراجعة", KIND_COLOR["leave"]),
+        ("📨 النتائج", len(rows), "من إجمالي " + str(len(all_rows)), "#0f172a"),
+        ("⏳ قيد المراجعة", len(pend), "محتاجة قرار", "#f59e0b"),
+        ("💵 سلف معلّقة", f"{adv_sum:,.0f}", "ريال", KIND_COLOR["advance"]),
+        ("🌴 إجازات معلّقة", sum(1 for r in pend if r["kind"] == "leave"), "طلب", KIND_COLOR["leave"]),
     ])
 
-    f1, f2, f3, f4 = st.columns([2, 2, 2.4, 3])
-    status_opts = {"⏳ قيد المراجعة": "pending", "✅ تمت الموافقة": "approved", "❌ مرفوضة": "rejected",
-                   "🚫 ملغية": "cancelled", "الكل": None}
-    status_pick = f1.selectbox("الحالة", list(status_opts.keys()), key="rqa_status")
-    kind_opts = {"الكل": None, "🌐 إنترنت": "internet", "💵 سلفة": "advance", "🌴 إجازة": "leave"}
-    kind_pick = f2.selectbox("النوع", list(kind_opts.keys()), key="rqa_kind")
-    rng = f3.date_input("الفترة (اختياري)", value=(), key="rqa_rng")
-    q = f4.text_input("بحث بالـ ID أو الاسم", key="rqa_q").strip().lower()
+    # ---------- تصدير Excel ----------
+    admin_section("📥 تصدير Excel")
+    x1, x2, x3 = st.columns([2, 2, 2])
+    stamp = today_ksa().isoformat()
+    x1.download_button("📥 النتائج الحالية (حسب الفلتر)", requests_excel(rows, perf),
+                       file_name="requests_filtered_" + stamp + ".xlsx", use_container_width=True,
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       key="dl_filtered", disabled=not rows)
+    day = x2.date_input("📅 تقرير يوم معيّن", value=today_ksa(), key="exp_day")
+    day_rows = [r for r in all_rows if str(r["created_at"])[:10] == day.isoformat()]
+    x3.download_button("📥 تقرير يوم " + day.isoformat() + " (" + str(len(day_rows)) + " طلب)",
+                       requests_excel(day_rows, perf), file_name="requests_" + day.isoformat() + ".xlsx",
+                       use_container_width=True, key="dl_day", disabled=not day_rows,
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-    d1 = d2 = None
-    if isinstance(rng, (tuple, list)) and len(rng) == 2:
-        d1, d2 = rng[0].isoformat(), rng[1].isoformat()
-    elif isinstance(rng, (tuple, list)) and len(rng) == 1:
-        d1 = d2 = rng[0].isoformat()
-
-    shown = [r for r in rows
-             if (status_opts[status_pick] is None or r["status"] == status_opts[status_pick])
-             and (kind_opts[kind_pick] is None or r["kind"] == kind_opts[kind_pick])
-             and (d1 is None or d1 <= str(r["created_at"])[:10] <= d2)
-             and (not q or q in str(r["rider_id"]).lower() or q in (r.get("rider_name") or "").lower())]
-
+    # ---------- العرض ----------
+    admin_section("📋 الطلبات")
     v1, v2 = st.columns([3, 2])
-    v1.caption("النتيجة: " + str(len(shown)) + " طلب")
+    v1.markdown('<div class="adm-result">النتيجة: ' + str(len(rows)) + " طلب</div>", unsafe_allow_html=True)
     view = v2.radio("العرض", ["🗂 كروت", "📋 جدول"], horizontal=True, key="rqa_view", label_visibility="collapsed")
 
-    if not shown:
+    if not rows:
         st.markdown('<div class="rq-empty">مفيش طلبات بالفلتر ده 🎉</div>', unsafe_allow_html=True)
     elif view == "📋 جدول":
-        table = pd.DataFrame([req_to_row(r) for r in shown], columns=HEADERS)
-        st.dataframe(table, use_container_width=True, hide_index=True)
+        st.dataframe(requests_df(rows, perf), use_container_width=True, hide_index=True)
     else:
         limit = st.session_state.get("rqa_limit", 20)
-        for r in shown[:limit]:
+        for r in rows[:limit]:
             st.markdown(request_card(r, AR_ADMIN["kind"][r["kind"]], AR_ADMIN["status"][r["status"]],
-                                     AR_ADMIN["labels"], admin=True, ctx=admin_ctx(r, perf, rows)),
+                                     AR_ADMIN["labels"], admin=True, ctx=admin_ctx(r, perf, all_rows)),
                         unsafe_allow_html=True)
             n_col, a_col, r_col, o_col = st.columns([5, 1.3, 1.3, 1.1])
             note = n_col.text_input("ملاحظة للمندوب (اختياري)", value=r.get("admin_note") or "",
@@ -1526,78 +1536,149 @@ def admin_requests_ui():
                                                           help="رجّع الطلب لقيد المراجعة"):
                 update_request(r["id"], "pending", note)
                 st.rerun()
-        if len(shown) > limit:
-            if st.button("عرض المزيد (" + str(len(shown) - limit) + " متبقي)", use_container_width=True, key="rqa_more"):
+        if len(rows) > limit:
+            if st.button("عرض المزيد (" + str(len(rows) - limit) + " متبقي)", use_container_width=True, key="rqa_more"):
                 st.session_state["rqa_limit"] = limit + 20
                 st.rerun()
 
-    if rows:
-        out = pd.DataFrame([req_to_row(r) for r in rows], columns=HEADERS)
-        st.download_button("📥 تحميل كل الطلبات CSV", out.to_csv(index=False).encode("utf-8-sig"),
-                           file_name="requests.csv", mime="text/csv", key="rqa_dl")
+    with st.expander("📤 استرجاع الطلبات من ملف Excel (لو السيرفر عمل ريستارت)"):
+        st.caption("ارفع ملف Excel كنت نزّلته من هنا (شيت «الطلبات»). الطلبات الموجودة بنفس الرقم مش بتتكرر.")
+        up = st.file_uploader("ملف الطلبات", type=["xlsx"], key="restore_file")
+        if up and st.button("استرجاع", key="restore_btn"):
+            try:
+                n = restore_from_excel(up)
+                st.success("اترجّع " + str(n) + " طلب.")
+            except Exception as ex:
+                st.error("مقدرتش أقرأ الملف: " + str(ex))
 
 
-def admin_dashboard_ui():
-    rows = list_requests(limit=5000)
+# ------------------------------------------------------------
+# تاب لوحة المتابعة
+# ------------------------------------------------------------
+def admin_dashboard_ui(rows, perf):
     if not rows:
-        st.markdown('<div class="rq-empty">لسه مفيش طلبات.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="rq-empty">مفيش بيانات بالفلتر الحالي.</div>', unsafe_allow_html=True)
         return
-    today = datetime.now(KSA_TZ).date()
-    today_s, month_s = today.isoformat(), today.strftime("%Y-%m")
-    pend = [r for r in rows if r["status"] == "pending"]
-    month_rows = [r for r in rows if str(r["created_at"])[:7] == month_s]
-    adv_ok = sum((r.get("amount") or 0) for r in month_rows if r["kind"] == "advance" and r["status"] == "approved")
-    leave_ok = sum((req_days(r) or 0) for r in month_rows if r["kind"] == "leave" and r["status"] == "approved")
+
+    cnt = Counter(r["status"] for r in rows)
+    adv_req = sum((r.get("amount") or 0) for r in rows if r["kind"] == "advance" and r["status"] not in ("cancelled", "rejected"))
+    adv_ok = sum((r.get("amount") or 0) for r in rows if r["kind"] == "advance" and r["status"] == "approved")
+    leave_ok = sum((req_days(r) or 0) for r in rows if r["kind"] == "leave" and r["status"] == "approved")
+    decided = cnt["approved"] + cnt["rejected"]
 
     kpi_row([
-        ("⏳ قيد المراجعة", len(pend), "محتاجة قرار", "#f59e0b"),
-        ("🆕 طلبات النهاردة", sum(1 for r in rows if str(r["created_at"])[:10] == today_s), today_s, "#2563eb"),
-        ("📅 طلبات الشهر ده", len(month_rows), month_s, "#0f172a"),
-        ("⚡ متوسط وقت الرد", avg_response_text(rows), "من الإرسال للقرار", "#16a34a"),
+        ("📨 إجمالي الطلبات", len(rows), "حسب الفلتر", "#0f172a"),
+        ("⏳ قيد المراجعة", cnt["pending"], "محتاجة قرار", "#f59e0b"),
+        ("✅ موافق عليها", cnt["approved"], (f"{cnt['approved'] * 100 // decided}% من المقررة" if decided else "—"), "#16a34a"),
+        ("❌ مرفوضة", cnt["rejected"], "طلب", "#dc2626"),
     ])
     kpi_row([
-        ("✅ موافق عليها (الشهر)", sum(1 for r in month_rows if r["status"] == "approved"), "كل الأنواع", "#16a34a"),
-        ("❌ مرفوضة (الشهر)", sum(1 for r in month_rows if r["status"] == "rejected"), "كل الأنواع", "#dc2626"),
-        ("💵 سلف معتمدة (الشهر)", f"{adv_ok:,.0f}", "ريال", KIND_COLOR["advance"]),
-        ("🌴 أيام إجازة معتمدة (الشهر)", leave_ok, "يوم", KIND_COLOR["leave"]),
+        ("💵 سلف مطلوبة", f"{adv_req:,.0f}", "ريال (بدون الملغي/المرفوض)", KIND_COLOR["advance"]),
+        ("💰 سلف معتمدة", f"{adv_ok:,.0f}", "ريال", "#16a34a"),
+        ("🌴 أيام إجازة معتمدة", leave_ok, "يوم", KIND_COLOR["leave"]),
+        ("⚡ متوسط وقت الرد", avg_response_text(rows), "من الإرسال للقرار", "#2563eb"),
     ])
 
-    admin_section("📈 الطلبات آخر 14 يوم")
-    days = [today - timedelta(days=i) for i in range(13, -1, -1)]
-    cnt = {k: {d.isoformat(): 0 for d in days} for k in KINDS}
+    # ----- اتجاه الطلبات اليومي -----
+    admin_section("📈 الطلبات يوميًا حسب النوع")
+    dates = sorted({str(r["created_at"])[:10] for r in rows})
+    d_min, d_max = date.fromisoformat(dates[0]), date.fromisoformat(dates[-1])
+    if (d_max - d_min).days > 59:
+        d_min = d_max - timedelta(days=59)
+    span = [(d_min + timedelta(days=i)).isoformat() for i in range((d_max - d_min).days + 1)]
+    counts = Counter((str(r["created_at"])[:10], KIND_AR[r["kind"]]) for r in rows)
+    long_df = pd.DataFrame([{"التاريخ": d, "النوع": KIND_AR[k], "العدد": counts.get((d, KIND_AR[k]), 0)}
+                            for d in span for k in KINDS])
+    kind_scale = alt.Scale(domain=[KIND_AR[k] for k in KINDS], range=[KIND_COLOR[k] for k in KINDS])
+    trend = (alt.Chart(long_df).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
+             .encode(x=alt.X("التاريخ:N", sort=None, title=None, axis=alt.Axis(labelAngle=-45)),
+                     y=alt.Y("العدد:Q", title=None),
+                     color=alt.Color("النوع:N", scale=kind_scale, legend=alt.Legend(orient="bottom", title=None)),
+                     tooltip=["التاريخ", "النوع", "العدد"])
+             .properties(height=280))
+    st.altair_chart(trend, use_container_width=True)
+
+    # ----- دوناتس -----
+    c1, c2 = st.columns(2)
+    with c1:
+        admin_section("🧩 حسب النوع")
+        kd = pd.DataFrame([{"النوع": KIND_AR[k], "العدد": sum(1 for r in rows if r["kind"] == k)} for k in KINDS])
+        st.altair_chart(alt.Chart(kd).mark_arc(innerRadius=55)
+                        .encode(theta="العدد:Q", color=alt.Color("النوع:N", scale=kind_scale,
+                                                                   legend=alt.Legend(orient="bottom", title=None)),
+                                tooltip=["النوع", "العدد"]).properties(height=240), use_container_width=True)
+    with c2:
+        admin_section("🚦 حسب الحالة")
+        sd = pd.DataFrame([{"الحالة": STATUS_AR[s], "العدد": cnt[s]} for s in STATUS_AR if cnt[s]])
+        st_scale = alt.Scale(domain=[STATUS_AR[s] for s in STATUS_AR], range=[STATUS_COLOR[s] for s in STATUS_AR])
+        st.altair_chart(alt.Chart(sd).mark_arc(innerRadius=55)
+                        .encode(theta="العدد:Q", color=alt.Color("الحالة:N", scale=st_scale,
+                                                                   legend=alt.Legend(orient="bottom", title=None)),
+                                tooltip=["الحالة", "العدد"]).properties(height=240), use_container_width=True)
+
+    # ----- ساعات الذروة -----
+    admin_section("🕒 أوقات إرسال الطلبات (بالساعة)")
+    hours = Counter()
     for r in rows:
-        dd = str(r["created_at"])[:10]
-        if dd in cnt.get(r["kind"], {}):
-            cnt[r["kind"]][dd] += 1
-    chart_df = pd.DataFrame({KIND_AR[k]: [cnt[k][d.isoformat()] for d in days] for k in KINDS},
-                            index=[d.strftime("%m-%d") for d in days])
-    try:
-        st.bar_chart(chart_df, color=[KIND_COLOR[k] for k in KINDS])
-    except Exception:
-        st.bar_chart(chart_df)
+        try:
+            hours[int(str(r["created_at"])[11:13])] += 1
+        except Exception:
+            pass
+    hd = pd.DataFrame([{"الساعة": f"{h:02d}:00", "العدد": hours.get(h, 0)} for h in range(24)])
+    st.altair_chart(alt.Chart(hd).mark_bar(color="#2563eb", cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
+                    .encode(x=alt.X("الساعة:N", sort=None, title=None, axis=alt.Axis(labelAngle=-45)),
+                            y=alt.Y("العدد:Q", title=None), tooltip=["الساعة", "العدد"]).properties(height=200),
+                    use_container_width=True)
 
+    # ----- أقدم الطلبات المعلقة -----
+    admin_section("⏰ أقدم الطلبات المعلّقة")
+    now = datetime.now(KSA_TZ).replace(tzinfo=None)
+    aging = []
+    for r in sorted([x for x in rows if x["status"] == "pending"], key=lambda x: x["created_at"])[:10]:
+        try:
+            hrs = (now - datetime.strptime(r["created_at"], "%Y-%m-%d %H:%M")).total_seconds() / 3600
+            age = f"{int(hrs // 24)} يوم" if hrs >= 24 else f"{hrs:.0f} ساعة"
+        except Exception:
+            age = "—"
+        aging.append({"رقم الطلب": r["id"], "التاريخ": str(r["created_at"])[:10], "المندوب": r.get("rider_name") or "—",
+                      "ID": r["rider_id"], "النوع": KIND_AR[r["kind"]], "معلّق من": age})
+    if aging:
+        st.dataframe(pd.DataFrame(aging), use_container_width=True, hide_index=True)
+    else:
+        st.markdown('<div class="rq-empty">مفيش طلبات معلّقة ✅</div>', unsafe_allow_html=True)
+
+    # ----- أكتر المناديب -----
     admin_section("🏅 أكتر المناديب طلبًا")
     counter = Counter(str(r["rider_id"]) for r in rows)
     names = {}
     for r in rows:
         names.setdefault(str(r["rider_id"]), r.get("rider_name") or "—")
-    top = pd.DataFrame([{"المندوب": names[k], "ID": k, "عدد الطلبات": v,
-                         "سلف": sum(1 for r in rows if str(r["rider_id"]) == k and r["kind"] == "advance"),
-                         "إجازات": sum(1 for r in rows if str(r["rider_id"]) == k and r["kind"] == "leave"),
-                         "إنترنت": sum(1 for r in rows if str(r["rider_id"]) == k and r["kind"] == "internet")}
-                        for k, v in counter.most_common(8)])
+    top = pd.DataFrame([{
+        "المندوب": names[k], "ID": k, "Segment": str((perf.get(k) or {}).get("segment") or "—"), "إجمالي": v,
+        "إنترنت": sum(1 for r in rows if str(r["rider_id"]) == k and r["kind"] == "internet"),
+        "سلف": sum(1 for r in rows if str(r["rider_id"]) == k and r["kind"] == "advance"),
+        "إجازات": sum(1 for r in rows if str(r["rider_id"]) == k and r["kind"] == "leave"),
+        "سلف معتمدة (ريال)": sum((r.get("amount") or 0) for r in rows
+                                 if str(r["rider_id"]) == k and r["kind"] == "advance" and r["status"] == "approved"),
+    } for k, v in counter.most_common(10)])
     st.dataframe(top, use_container_width=True, hide_index=True)
 
-    admin_section("🕒 آخر 10 طلبات")
-    st.dataframe(pd.DataFrame([req_to_row(r) for r in rows[:10]], columns=HEADERS),
-                 use_container_width=True, hide_index=True)
+    # ----- ملخص يومي -----
+    admin_section("🗓 الملخص اليومي")
+    daily = daily_summary_df(rows)
+    st.dataframe(daily, use_container_width=True, hide_index=True)
+    st.download_button("📥 تحميل الملخص اليومي Excel",
+                       to_excel_bytes({"ملخص يومي": daily}),
+                       file_name="daily_summary_" + today_ksa().isoformat() + ".xlsx", key="dl_daily",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
-def admin_rider_history_ui():
-    rows = list_requests(limit=5000)
-    perf = perf_map()
+# ------------------------------------------------------------
+# تاب سجل المندوب
+# ------------------------------------------------------------
+def admin_rider_history_ui(all_rows, perf):
     by_rider = {}
-    for r in rows:
+    for r in all_rows:
         by_rider.setdefault(str(r["rider_id"]), []).append(r)
 
     q = st.text_input("🔎 ابحث برقم المندوب أو اسمه", key="rh_q").strip().lower()
@@ -1613,108 +1694,42 @@ def admin_rider_history_ui():
         return
     pick = st.selectbox("المندوب", sorted(options.keys()), key="rh_pick")
     rid = options[pick]
-    mine = by_rider.get(rid, [])
+    mine_all = by_rider.get(rid, [])
     p = perf.get(rid)
 
+    f1, f2 = st.columns(2)
+    k_pick = f1.multiselect("نوع الطلب", [KIND_AR[k] for k in KINDS], key="rh_k", placeholder="الكل")
+    s_pick = f2.multiselect("الحالة", list(STATUS_AR.values()), key="rh_s", placeholder="الكل")
+    mine = [r for r in mine_all
+            if (not k_pick or KIND_AR[r["kind"]] in k_pick) and (not s_pick or STATUS_AR[r["status"]] in s_pick)]
+
     seg = str((p or {}).get("segment") or "—")
-    name = (p or {}).get("rider_name") or (mine[0].get("rider_name") if mine else "") or "—"
+    name = (p or {}).get("rider_name") or (mine_all[0].get("rider_name") if mine_all else "") or "—"
     st.markdown(
         '<div class="adm-rider-head"><b>' + html.escape(str(name)) + '</b><br><small>ID ' + html.escape(rid)
         + ' · Segment ' + html.escape(seg) + ' · طلبات: ' + html.escape(fmt_int((p or {}).get("orders")))
         + ' · On-Time: ' + html.escape(fmt_pct((p or {}).get("on_time_rate"))) + "</small></div>",
         unsafe_allow_html=True)
 
-    adv_ok = sum((r.get("amount") or 0) for r in mine if r["kind"] == "advance" and r["status"] == "approved")
-    lv_ok = sum((req_days(r) or 0) for r in mine if r["kind"] == "leave" and r["status"] == "approved")
+    adv_ok = sum((r.get("amount") or 0) for r in mine_all if r["kind"] == "advance" and r["status"] == "approved")
+    lv_ok = sum((req_days(r) or 0) for r in mine_all if r["kind"] == "leave" and r["status"] == "approved")
     kpi_row([
-        ("📨 إجمالي الطلبات", len(mine), "في السجل", "#0f172a"),
-        ("⏳ قيد المراجعة", sum(1 for r in mine if r["status"] == "pending"), "", "#f59e0b"),
+        ("📨 إجمالي الطلبات", len(mine_all), "في السجل", "#0f172a"),
+        ("⏳ قيد المراجعة", sum(1 for r in mine_all if r["status"] == "pending"), "", "#f59e0b"),
         ("💵 سلف معتمدة", f"{adv_ok:,.0f}", "ريال", KIND_COLOR["advance"]),
         ("🌴 إجازات معتمدة", lv_ok, "يوم", KIND_COLOR["leave"]),
     ])
 
     admin_section("🗓 السجل الكامل (الأحدث أولًا)")
     if not mine:
-        st.markdown('<div class="rq-empty">المندوب ده معملش أي طلبات لسه.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="rq-empty">مفيش طلبات بالفلتر ده.</div>', unsafe_allow_html=True)
         return
     for r in mine:
         st.markdown(request_card(r, AR_ADMIN["kind"][r["kind"]], AR_ADMIN["status"][r["status"]],
                                  AR_ADMIN["labels"], admin=False, rtl=True), unsafe_allow_html=True)
-    st.download_button("📥 تحميل سجل المندوب CSV",
-                       pd.DataFrame([req_to_row(r) for r in mine], columns=HEADERS).to_csv(index=False).encode("utf-8-sig"),
-                       file_name="rider_" + rid + "_requests.csv", mime="text/csv", key="rh_dl")
-
-
-def gs_setup_help():
-    with st.expander("📘 إزاي أفعّل الربط مع Google Sheet (مرة واحدة)", expanded=not gs_enabled()):
-        st.markdown(
-            """
-1. روح **Google Cloud Console** ← اعمل مشروع ← فعّل **Google Sheets API**.
-2. من **IAM & Admin ← Service Accounts** اعمل Service Account ← **Keys ← Add key ← JSON** وحمّل الملف.
-3. اعمل Google Sheet فاضي، وافتح **Share** وادّي إيميل الـ Service Account (`client_email` اللي في الملف) صلاحية **Editor**.
-4. خد الـ ID من رابط الشيت: `docs.google.com/spreadsheets/d/`**`ID`**`/edit`.
-5. في Streamlit Cloud ← **Settings ← Secrets** حط الآتي (انسخ القيم من ملف الـ JSON):
-            """
-        )
-        st.code(
-            'REQUESTS_SHEET_ID = "ضع هنا ID الشيت"\n'
-            '# ADMIN_PASSWORD = "باسورد الأدمن (اختياري)"\n\n'
-            "[gcp_service_account]\n"
-            'type = "service_account"\n'
-            'project_id = "..."\n'
-            'private_key_id = "..."\n'
-            'private_key = "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"\n'
-            'client_email = "xxx@xxx.iam.gserviceaccount.com"\n'
-            'client_id = "..."\n'
-            'token_uri = "https://oauth2.googleapis.com/token"',
-            language="toml")
-        st.markdown("6. أضف في `requirements.txt` السطرين: `gspread` و `google-auth` ثم Reboot للتطبيق.")
-
-
-def admin_sheet_ui():
-    gs_setup_help()
-    if not gs_enabled():
-        st.warning("الربط غير مفعّل لسه. أضف الـ Secrets زي الشرح فوق.")
-        return
-
-    sid = str(st.secrets["REQUESTS_SHEET_ID"])
-    try:
-        email = st.secrets["gcp_service_account"].get("client_email", "")
-    except Exception:
-        email = ""
-    st.markdown(
-        '<div class="adm-panel">📄 <a href="https://docs.google.com/spreadsheets/d/' + html.escape(sid)
-        + '" target="_blank">افتح Google Sheet</a><br><small>الإيميل اللي لازم يكون Editor على الشيت: <code>'
-        + html.escape(email) + "</code></small></div>", unsafe_allow_html=True)
-
-    unsynced = count_unsynced()
-    kpi_row([("🔄 مش متزامن", unsynced, "طلبات محتاجة رفع", "#f59e0b" if unsynced else "#16a34a"),
-             ("📨 إجمالي الطلبات", len(list_requests(limit=100000)), "في قاعدة البيانات", "#0f172a")])
-
-    c1, c2, c3 = st.columns(3)
-    if c1.button("🔌 اختبار الاتصال", use_container_width=True):
-        try:
-            _gs_ws.clear()
-            ws = _gs_ws()
-            st.success("متصل ✅ — عدد الطلبات الحالية في الشيت: " + str(max(len(ws.col_values(1)) - 1, 0)))
-        except Exception as ex:
-            st.error(type(ex).__name__ + ": " + str(ex)[:250])
-            st.caption("اتأكد إن الشيت متشير مع إيميل الـ Service Account بصلاحية Editor، وإن الـ ID صح.")
-    if c2.button("⬆️ ارفع غير المتزامن (" + str(unsynced) + ")", use_container_width=True, disabled=unsynced == 0):
-        try:
-            with st.spinner("..."):
-                ok_n, fail_n = gs_push_unsynced()
-            (st.success if not fail_n else st.warning)("تم رفع " + str(ok_n) + " وفشل " + str(fail_n))
-        except Exception as ex:
-            st.error(type(ex).__name__ + ": " + str(ex)[:250])
-    if c3.button("🔄 مزامنة كاملة (مسح الشيت وإعادة الكتابة)", use_container_width=True):
-        try:
-            with st.spinner("..."):
-                n = gs_push_all()
-            st.success("اتكتب " + str(n) + " طلب في الشيت.")
-        except Exception as ex:
-            st.error(type(ex).__name__ + ": " + str(ex)[:250])
-    st.caption("ملحوظة: لو سيرفر Streamlit عمل ريستارت وقاعدة البيانات اتمسحت، الطلبات بترجع تلقائي من الشيت.")
+    st.download_button("📥 تحميل سجل المندوب Excel", requests_excel(mine, perf),
+                       file_name="rider_" + rid + "_requests.xlsx", key="rh_dl",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 # ------------------------------------------------------------
@@ -1838,26 +1853,31 @@ else:
 
     st.markdown("<style>.block-container {max-width: 1200px;}</style>", unsafe_allow_html=True)
 
-    _pend = count_requests("pending")
-    admin_banner(_pend)
+    all_rows = list_requests(limit=100000)
+    perf = perf_map()
+    _pend = sum(1 for r in all_rows if r["status"] == "pending")
+    _today = sum(1 for r in all_rows if str(r["created_at"])[:10] == today_ksa().isoformat())
+    admin_banner(_pend, _today)
 
-    tab_req, tab_dash, tab_rider, tab_upload, tab_data, tab_sheet = st.tabs([
+    F = admin_filters(perf)
+    rows = apply_filters(all_rows, perf, F)
+
+    tab_req, tab_dash, tab_rider, tab_upload, tab_data = st.tabs([
         "📨 الطلبات" + (" (" + str(_pend) + ")" if _pend else ""),
         "📈 لوحة المتابعة",
         "👤 سجل مندوب",
         "📥 رفع الشيت",
         "📊 البيانات الحالية",
-        "🔗 Google Sheet",
     ])
 
     with tab_req:
-        admin_requests_ui()
+        admin_requests_ui(all_rows, rows, perf)
 
     with tab_dash:
-        admin_dashboard_ui()
+        admin_dashboard_ui(rows, perf)
 
     with tab_rider:
-        admin_rider_history_ui()
+        admin_rider_history_ui(all_rows, perf)
 
     with tab_upload:
         st.info("⚠️ أي رفع جديد هيمسح كل البيانات القديمة ويحط الملف الجديد مكانها.")
@@ -1919,15 +1939,30 @@ else:
         else:
             st.metric("Riders", f"{len(current):,}")
             st.caption(f"آخر رفع: {current['uploaded_at'].iloc[0]}")
-            st.dataframe(current.drop(columns=["uploaded_at"]),
-                         use_container_width=True, hide_index=True)
+
+            r1, r2, r3 = st.columns([3, 2, 2])
+            q_r = r1.text_input("🔎 بحث بالـ ID أو الاسم", key="cd_q").strip().lower()
+            seg_opts = sorted(current["segment"].astype(str).unique().tolist())
+            seg_r = r2.multiselect("السيجمنت", seg_opts, key="cd_seg", placeholder="الكل")
+            below_r = r3.checkbox("الأقل من التارجت فقط", key="cd_below")
+
+            view_df = current.copy()
+            if q_r:
+                view_df = view_df[view_df["rider_id"].astype(str).str.lower().str.contains(q_r, regex=False)
+                                  | view_df["rider_name"].astype(str).str.lower().str.contains(q_r, regex=False)]
+            if seg_r:
+                view_df = view_df[view_df["segment"].astype(str).isin(seg_r)]
+            if below_r and "target_per_day" in view_df.columns:
+                view_df = view_df[(view_df["target_per_day"].fillna(0) * view_df["days_covered"].fillna(0))
+                                  > view_df["orders"].fillna(0)]
+            view_df = view_df.drop(columns=["uploaded_at"])
+
+            st.caption(f"النتيجة: {len(view_df):,} مندوب")
+            st.dataframe(view_df, use_container_width=True, hide_index=True)
             st.download_button(
-                "📥 Download Current Data",
-                data=current.to_csv(index=False).encode("utf-8-sig"),
-                file_name="rider_performance_current.csv",
-                mime="text/csv",
+                "📥 Download Excel",
+                data=to_excel_bytes({"المناديب": view_df}),
+                file_name="rider_performance_" + today_ksa().isoformat() + ".xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
-
-    with tab_sheet:
-        admin_sheet_ui()
