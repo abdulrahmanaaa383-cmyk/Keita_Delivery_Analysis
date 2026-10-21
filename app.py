@@ -10,17 +10,25 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 # ============================================================
-# RIDER PERFORMANCE PORTAL (simplified + flexible)
-# - كل رفع جديد بيمسح البيانات القديمة بالكامل
-# - بيحتاج 11 عمود بس، وبيتعرف عليهم تلقائيًا أو تختارهم يدوي
+# RIDER PERFORMANCE PORTAL (HungerStation + Keeta)
+# - المندوب يختار المشروع الأول (هنجر ستيشن / كيتا) وبعدين يدخل الـ ID
+# - كل رفع جديد بيمسح بيانات المشروع ده بس (المشروع التاني مش بيتأثر)
+# - الطلبات: إجازات فقط
 # ============================================================
 
 st.set_page_config(page_title="Rider Performance", page_icon="🏆", layout="centered")
 
-DB_PATH = Path(__file__).parent / "rider_performance.db"
-TABLE = "rider_stats"
+BASE_DIR = Path(__file__).parent
+DB_PATH = BASE_DIR / "rider_performance.db"
+TABLE = "rider_stats"          # هنجر ستيشن (زي ما كان)
+KEETA_TABLE = "keeta_stats"    # كيتا
 
-# field_key: (اسم العرض, إجباري؟, أسماء بديلة محتملة للعمود - بعد التنضيف)
+PROJECTS = {
+    "keeta": {"name": "Keeta", "table": KEETA_TABLE, "logo": BASE_DIR / "keeta_logo.png"},
+    "hunger": {"name": "HungerStation", "table": TABLE, "logo": BASE_DIR / "hunger_logo.png"},
+}
+
+# ---------------- HungerStation fields ----------------
 FIELDS = {
     "rider_id":          ("Rider ID", True,  ["riderid", "id", "courierid", "driverid"]),
     "rider_name":        ("Rider Name", False, ["ridername", "name", "couriername", "drivername"]),
@@ -43,14 +51,35 @@ FIELDS = {
 
 INT_COLS = ["orders", "orders_in_time", "late_orders", "failed_orders"]
 PCT_COLS = ["chat_rate", "acceptance_rate", "verification_rate", "on_time_rate", "fail_rate", "final_score"]
-NONE_OPTION = "— مفيش —"
+
+# ---------------- Keeta fields (التيمبلت: id, name, accepted, Delivered Tasks, cancel,
+# Rejected Tasks, Cancellation Rate from Delivery Issues, Experience_On-time Rate (D),
+# orders late, valid day, level) ----------------
+KEETA_FIELDS = {
+    "rider_id":    ("id", True, ["id", "riderid", "courierid", "driverid"]),
+    "rider_name":  ("name", False, ["name", "ridername", "couriername", "drivername"]),
+    "accepted":    ("accepted", False, ["accepted", "acceptedtasks"]),
+    "delivered":   ("Delivered Tasks", False, ["deliveredtasks", "delivered", "completedorders"]),
+    "cancel":      ("cancel", False, ["cancel", "cancelled", "canceled"]),
+    "rejected":    ("Rejected Tasks", False, ["rejectedtasks", "rejected"]),
+    "cancel_rate": ("Cancellation Rate from Delivery Issues", False,
+                    ["cancellationratefromdeliveryissues", "cancellationrate"]),
+    "on_time_rate": ("Experience_On-time Rate (D)", False,
+                     ["experienceontimeratd", "experienceontimerate", "ontimerate", "ontime"]),
+    "orders_late": ("orders late", False, ["orderslate", "lateorders", "late"]),
+    "valid_day":   ("valid day", False, ["validday", "validdays"]),
+    "level":       ("level", False, ["level", "segment"]),
+}
+KEETA_INT = ["accepted", "delivered", "cancel", "rejected", "orders_late"]
+KEETA_PCT = ["cancel_rate", "on_time_rate"]
 
 
 # ------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------
 def norm(text):
-    return re.sub(r"[\s_\-]+", "", str(text).strip().lower())
+    # يشيل أي مسافات / رموز / أقواس عشان "Experience_On-time Rate (D)" يتعرف
+    return re.sub(r"[\W_]+", "", str(text).strip().lower())
 
 
 def clean_id(series):
@@ -58,19 +87,32 @@ def clean_id(series):
     return s.str.replace(r"\.0$", "", regex=True)
 
 
+def clean_text(series):
+    s = series.fillna("").astype(str).str.strip()
+    s = s.str.replace(r"\.0$", "", regex=True)
+    return s.replace({"nan": "", "None": "", "NaN": ""})
+
+
 def to_pct_column(series):
-    # لو القيم نصوص فيها علامة % (زي "57.14%") نشيلها ونعتبرها 0-100 جاهزة
-    if series.dtype == object:
-        txt = series.astype(str)
+    # لو القيم نصوص (زي "57.14%" أو "0.9981") نحولها لأرقام
+    if not pd.api.types.is_numeric_dtype(series):
+        txt = series.fillna("").astype(str)
         if txt.str.contains("%", regex=False).any():
             return pd.to_numeric(
                 txt.str.replace("%", "", regex=False).str.strip(), errors="coerce"
             ).fillna(0.0)
-    s = pd.to_numeric(series, errors="coerce").fillna(0.0)
+        s = pd.to_numeric(txt.str.strip(), errors="coerce").fillna(0.0)
+    else:
+        s = pd.to_numeric(series, errors="coerce").fillna(0.0)
     # لو العمود كله بين 0 و 1 يبقى نسبة -> نحولها لـ 0-100
     if len(s) and s.max() <= 1.0:
         s = s * 100
     return s
+
+
+def to_int_column(series):
+    txt = series.fillna("").astype(str).str.replace(",", "", regex=False).str.strip()
+    return pd.to_numeric(txt, errors="coerce").fillna(0).astype(int)
 
 
 def fmt_pct(v):
@@ -87,11 +129,25 @@ def fmt_int(v):
         return "—"
 
 
+def fmt_text(v):
+    v = "" if v is None else str(v).strip()
+    return v if v and v.lower() not in ("nan", "none") else "—"
+
+
 def segment_color(seg):
     return {
         "A": "#16a34a", "B": "#2563eb", "C": "#f59e0b",
         "D": "#f97316", "E": "#ef4444", "F": "#7f1d1d",
     }.get(str(seg).strip().upper(), "#64748b")
+
+
+def to_float_safe(v):
+    try:
+        if v is None or pd.isna(v):
+            return None
+        return float(v)
+    except Exception:
+        return None
 
 
 # ------------------------------------------------------------
@@ -102,7 +158,7 @@ def get_conn():
 
 
 def replace_all_data(df):
-    """يمسح القديم ويحط الجديد، مع الاحتفاظ بآخر سيجمنت/مؤشرات لكل رايدر فقط."""
+    """هنجر: يمسح القديم ويحط الجديد، مع الاحتفاظ بآخر سيجمنت/مؤشرات لكل رايدر فقط."""
     conn = get_conn()
     conn.execute("DROP TABLE IF EXISTS performance")  # جداول النسخة القديمة
     conn.execute("DROP TABLE IF EXISTS riders")
@@ -130,31 +186,42 @@ def replace_all_data(df):
     return int(df["prev_segment"].notna().sum())
 
 
-def table_exists():
+def replace_keeta_data(df):
+    """كيتا: يمسح القديم ويحط الجديد."""
+    conn = get_conn()
+    df.to_sql(KEETA_TABLE, conn, if_exists="replace", index=False)
+    conn.commit()
+    conn.close()
+
+
+def table_exists(table):
     conn = get_conn()
     row = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (TABLE,)
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
     ).fetchone()
     conn.close()
     return row is not None
 
 
-def get_rider(rider_id):
-    if not table_exists():
+def get_rider(rider_id, project):
+    table = PROJECTS[project]["table"]
+    if not table_exists(table):
         return None
     conn = get_conn()
     df = pd.read_sql_query(
-        f"SELECT * FROM {TABLE} WHERE rider_id = ? LIMIT 1", conn, params=[rider_id]
+        f"SELECT * FROM {table} WHERE rider_id = ? LIMIT 1", conn, params=[rider_id]
     )
     conn.close()
     return None if df.empty else df.iloc[0].to_dict()
 
 
-def get_all():
-    if not table_exists():
+def get_all(project):
+    table = PROJECTS[project]["table"]
+    if not table_exists(table):
         return pd.DataFrame()
+    order = "segment, rider_id" if project == "hunger" else "rider_id"
     conn = get_conn()
-    df = pd.read_sql_query(f"SELECT * FROM {TABLE} ORDER BY segment, rider_id", conn)
+    df = pd.read_sql_query(f"SELECT * FROM {table} ORDER BY {order}", conn)
     conn.close()
     return df
 
@@ -162,11 +229,12 @@ def get_all():
 # ------------------------------------------------------------
 # Upload logic
 # ------------------------------------------------------------
-def auto_map(columns):
+def auto_map(columns, fields=None):
     """يرجّع {field_key: اسم العمود في الإكسيل أو None}"""
+    fields = fields or FIELDS
     by_norm = {norm(c): c for c in columns}
     mapping = {}
-    for key, (_, _, aliases) in FIELDS.items():
+    for key, (_, _, aliases) in fields.items():
         mapping[key] = next((by_norm[a] for a in aliases if a in by_norm), None)
     return mapping
 
@@ -198,6 +266,26 @@ def build_clean_df(raw, mapping):
         raw[mapping["segment"]].fillna("—").astype(str).str.strip().replace("", "—")
         if mapping["segment"] else "—"
     )
+
+    out = out[(out["rider_id"] != "") & (out["rider_id"].str.lower() != "nan")]
+    out = out.drop_duplicates(subset="rider_id", keep="last").reset_index(drop=True)
+    out["uploaded_at"] = datetime.now().isoformat(timespec="seconds")
+    return out
+
+
+def build_keeta_df(raw, mapping):
+    out = pd.DataFrame()
+    out["rider_id"] = clean_id(raw[mapping["rider_id"]])
+    out["rider_name"] = clean_text(raw[mapping["rider_name"]]) if mapping["rider_name"] else ""
+
+    for c in KEETA_INT:
+        out[c] = to_int_column(raw[mapping[c]]) if mapping[c] else 0
+    for c in KEETA_PCT:
+        out[c] = to_pct_column(raw[mapping[c]]) if mapping[c] else 0.0
+
+    # valid day و level ممكن يكونوا فاضيين (بيظهروا آخر الشهر)
+    out["valid_day"] = clean_text(raw[mapping["valid_day"]]) if mapping["valid_day"] else ""
+    out["level"] = clean_text(raw[mapping["level"]]) if mapping["level"] else ""
 
     out = out[(out["rider_id"] != "") & (out["rider_id"].str.lower() != "nan")]
     out = out.drop_duplicates(subset="rider_id", keep="last").reset_index(drop=True)
@@ -243,21 +331,19 @@ st.markdown("""
     [class*="viewerBadge"], [class*="_profileContainer"], [class*="_terminalButton"],
     [class*="_container_gzau3"], [class*="_link_gzau3"] {display: none !important;}
     .block-container {max-width: 1000px; padding-top: 2rem; padding-bottom: 3rem;}
+    [data-testid="stImage"] {display:flex; justify-content:center;}
+    [data-testid="stImage"] img {border-radius:22px;}
     .brand {text-align:center; margin-bottom:1.5rem;}
     .brand-icon {font-size:46px; line-height:1;}
     .brand-title {font-size:32px; font-weight:800; letter-spacing:-.7px;}
     .brand-subtitle {color:#6b7280; font-size:15px; margin-top:5px;}
+    .proj-fallback {text-align:center; font-size:26px; font-weight:900; padding:40px 10px; border-radius:22px;
+                    background:#f1f5f9; margin-bottom:8px;}
     .profile {background:linear-gradient(145deg,#0f172a,#1e293b); color:#fff;
               border-radius:24px; padding:30px; margin-top:25px;
               box-shadow:0 15px 45px rgba(15,23,42,.18);}
     .profile-name {font-size:30px; font-weight:800;}
     .profile-id {color:#cbd5e1; margin-top:4px; font-size:14px;}
-    .segment {display:inline-block; min-width:76px; text-align:center; border-radius:14px;
-              padding:10px 18px; font-size:25px; font-weight:900; margin-top:15px;}
-    .seg-a {background:#16a34a;color:#fff;} .seg-b {background:#2563eb;color:#fff;}
-    .seg-c {background:#f59e0b;color:#fff;} .seg-d {background:#f97316;color:#fff;}
-    .seg-e {background:#ef4444;color:#fff;} .seg-f {background:#7f1d1d;color:#fff;}
-    .seg-other {background:#64748b;color:#fff;}
     .metric-card {background:#fff; border:1px solid #e5e7eb; border-radius:18px;
                   padding:18px; min-height:105px; margin-bottom:12px;
                   box-shadow:0 5px 18px rgba(15,23,42,.04);}
@@ -403,7 +489,7 @@ else:
             st.rerun()
 
 # ------------------------------------------------------------
-# Public page
+# Public page texts
 # ------------------------------------------------------------
 LANGS = {"English": "en", "العربية": "ar", "اردو": "ur", "বাংলা": "bn"}
 RTL_LANGS = ("ar", "ur")
@@ -453,6 +539,45 @@ TEXTS = {
         "fail": "ফেইল অর্ডার", "final": "ফাইনাল কোয়ালিটি স্কোর", "segment": "সেগমেন্ট",
         "footer": "সর্বশেষ আপলোড করা রিপোর্টের ভিত্তিতে পারফরম্যান্স দেখানো হয়েছে।",
     },
+}
+
+# شاشة اختيار المشروع
+CHOOSE = {
+    "en": {"title": "Choose your project", "sub": "Select the project you work on to continue",
+           "change": "↩ Change project"},
+    "ar": {"title": "اختر المشروع", "sub": "اختر المشروع اللي بتشتغل عليه عشان تكمل",
+           "change": "↩ تغيير المشروع"},
+    "ur": {"title": "اپنا پروجیکٹ منتخب کریں", "sub": "جاری رکھنے کے لیے وہ پروجیکٹ منتخب کریں جس پر آپ کام کرتے ہیں",
+           "change": "↩ پروجیکٹ تبدیل کریں"},
+    "bn": {"title": "আপনার প্রজেক্ট বেছে নিন", "sub": "চালিয়ে যেতে আপনি যে প্রজেক্টে কাজ করেন সেটি নির্বাচন করুন",
+           "change": "↩ প্রজেক্ট পরিবর্তন করুন"},
+}
+
+# نصوص كيتا
+KTXT = {
+    "en": {"accepted": "Accepted Tasks", "delivered": "Delivered Tasks", "cancel": "Cancelled",
+           "rejected": "Rejected Tasks", "cancel_rate": "Cancellation Rate (Delivery Issues)",
+           "on_time": "On-Time Rate", "late": "Late Orders", "valid_days": "Valid Days", "level": "Level",
+           "month_end": "Valid Days and Level are published near the end of the month.",
+           "footer": "Performance is based on the latest uploaded Keeta report."},
+    "ar": {"accepted": "المهام المقبولة", "delivered": "المهام الموصلة", "cancel": "الملغية",
+           "rejected": "المهام المرفوضة", "cancel_rate": "نسبة الإلغاء (مشاكل التوصيل)",
+           "on_time": "نسبة التوصيل في الوقت", "late": "الطلبات المتأخرة", "valid_days": "الأيام الصالحة",
+           "level": "المستوى",
+           "month_end": "الأيام الصالحة والمستوى بيظهروا قرب نهاية الشهر.",
+           "footer": "الأداء مبني على آخر تقرير كيتا تم رفعه."},
+    "ur": {"accepted": "قبول شدہ ٹاسکس", "delivered": "ڈیلیور شدہ ٹاسکس", "cancel": "منسوخ",
+           "rejected": "مسترد ٹاسکس", "cancel_rate": "منسوخی کی شرح (ڈیلیوری مسائل)",
+           "on_time": "بروقت ڈیلیوری کی شرح", "late": "تاخیر سے آرڈرز", "valid_days": "درست دن",
+           "level": "لیول",
+           "month_end": "درست دن اور لیول مہینے کے آخر کے قریب ظاہر ہوتے ہیں۔",
+           "footer": "کارکردگی کیٹا کی آخری اپ لوڈ کی گئی رپورٹ پر مبنی ہے۔"},
+    "bn": {"accepted": "গৃহীত টাস্ক", "delivered": "ডেলিভারি হওয়া টাস্ক", "cancel": "বাতিল",
+           "rejected": "প্রত্যাখ্যাত টাস্ক", "cancel_rate": "বাতিলের হার (ডেলিভারি সমস্যা)",
+           "on_time": "সময়মতো ডেলিভারির হার", "late": "দেরিতে ডেলিভারি হওয়া অর্ডার", "valid_days": "বৈধ দিন",
+           "level": "লেভেল",
+           "month_end": "বৈধ দিন ও লেভেল মাসের শেষের দিকে প্রকাশ করা হয়।",
+           "footer": "সর্বশেষ আপলোড করা কিটা রিপোর্টের ভিত্তিতে পারফরম্যান্স দেখানো হয়েছে।"},
 }
 
 
@@ -572,7 +697,7 @@ TIPS = {
     },
 }
 
-TIPS_IMAGE = Path(__file__).parent / "tips_chat.jpg"
+TIPS_IMAGE = BASE_DIR / "tips_chat.jpg"
 
 
 def render_tips(T, K):
@@ -689,17 +814,8 @@ def render_segment_change(d, seg, T, C):
     )
 
 
-def to_float_safe(v):
-    try:
-        if v is None or pd.isna(v):
-            return None
-        return float(v)
-    except Exception:
-        return None
-
-
 # ============================================================
-# التارجت اليومي: بيقارن طلبات المندوب (من نفس الشيت) بالتارجت × عدد الأيام
+# التارجت اليومي (هنجر ستيشن)
 # ============================================================
 TARGETMSG = {
     "en": {"title": "🎯 Daily Target", "ok": "✅ You are on track with the target",
@@ -749,11 +865,10 @@ def render_target_status(d, M):
 
 
 # ============================================================
-# 📨 نظام الطلبات: إنترنت / سلفة / إجازة
+# 📨 نظام الطلبات: إجازات فقط
 # المندوب يبعت من صفحته، والأدمن يشوفها ويوافق أو يرفض من تاب Requests
 # ============================================================
-KINDS = ["internet", "advance", "leave"]
-KIND_ICON = {"internet": "🌐", "advance": "💵", "leave": "🌴"}
+KINDS = ["leave"]
 KIND_COLOR = {"internet": "#0ea5e9", "advance": "#8b5cf6", "leave": "#14b8a6"}
 STATUS_COLOR = {"pending": "#f59e0b", "approved": "#16a34a", "rejected": "#dc2626"}
 KSA_TZ = timezone(timedelta(hours=3))
@@ -761,13 +876,10 @@ KSA_TZ = timezone(timedelta(hours=3))
 REQ = {
     "en": {
         "tab_perf": "📊 My Performance", "tab_req": "📨 My Requests",
-        "title": "Requests", "sub": "Send a request to the management and track its status",
-        "k_internet": "🌐 Internet", "k_advance": "💵 Advance", "k_leave": "🌴 Leave",
-        "h_internet": "Internet request", "h_advance": "Advance request", "h_leave": "Leave request",
-        "f_phone": "Mobile number", "f_phone_ph": "05xxxxxxxx", "f_note": "Notes (optional)",
-        "f_amount": "Amount (SAR)", "f_from": "From", "f_to": "To", "submit": "Send request",
+        "title": "Leave Requests", "sub": "Send a leave request to the management and track its status",
+        "h_leave": "Leave request",
+        "f_note": "Notes (optional)", "f_from": "From", "f_to": "To", "submit": "Send request",
         "ok": "✅ Your request was sent (No. {n}). The management will review it.",
-        "err_phone": "Please enter a valid mobile number.", "err_amount": "Please enter the amount.",
         "err_dates": "The end date must be the same day or after the start date.",
         "dup": "You already have a pending request of this type.",
         "my_title": "Your requests", "none": "You have no requests yet.",
@@ -777,13 +889,10 @@ REQ = {
     },
     "ar": {
         "tab_perf": "📊 أدائي", "tab_req": "📨 طلباتي",
-        "title": "الطلبات", "sub": "ابعت طلبك للإدارة وتابع حالته",
-        "k_internet": "🌐 إنترنت", "k_advance": "💵 سلفة", "k_leave": "🌴 إجازة",
-        "h_internet": "طلب إنترنت", "h_advance": "طلب سلفة", "h_leave": "طلب إجازة",
-        "f_phone": "رقم الجوال", "f_phone_ph": "05xxxxxxxx", "f_note": "ملاحظات (اختياري)",
-        "f_amount": "المبلغ (ريال)", "f_from": "من", "f_to": "إلى", "submit": "إرسال الطلب",
+        "title": "طلبات الإجازة", "sub": "ابعت طلب الإجازة للإدارة وتابع حالته",
+        "h_leave": "طلب إجازة",
+        "f_note": "ملاحظات (اختياري)", "f_from": "من", "f_to": "إلى", "submit": "إرسال الطلب",
         "ok": "✅ تم إرسال طلبك (رقم {n}). الإدارة هتراجعه.",
-        "err_phone": "من فضلك اكتب رقم جوال صحيح.", "err_amount": "من فضلك اكتب المبلغ.",
         "err_dates": "تاريخ النهاية لازم يكون نفس يوم البداية أو بعده.",
         "dup": "عندك طلب من النوع ده قيد المراجعة بالفعل.",
         "my_title": "طلباتك", "none": "مفيش طلبات لسه.",
@@ -793,13 +902,10 @@ REQ = {
     },
     "ur": {
         "tab_perf": "📊 میری کارکردگی", "tab_req": "📨 میری درخواستیں",
-        "title": "درخواستیں", "sub": "انتظامیہ کو درخواست بھیجیں اور اس کی حالت دیکھیں",
-        "k_internet": "🌐 انٹرنیٹ", "k_advance": "💵 ایڈوانس", "k_leave": "🌴 چھٹی",
-        "h_internet": "انٹرنیٹ کی درخواست", "h_advance": "ایڈوانس کی درخواست", "h_leave": "چھٹی کی درخواست",
-        "f_phone": "موبائل نمبر", "f_phone_ph": "05xxxxxxxx", "f_note": "نوٹس (اختیاری)",
-        "f_amount": "رقم (ریال)", "f_from": "سے", "f_to": "تک", "submit": "درخواست بھیجیں",
+        "title": "چھٹی کی درخواستیں", "sub": "انتظامیہ کو چھٹی کی درخواست بھیجیں اور اس کی حالت دیکھیں",
+        "h_leave": "چھٹی کی درخواست",
+        "f_note": "نوٹس (اختیاری)", "f_from": "سے", "f_to": "تک", "submit": "درخواست بھیجیں",
         "ok": "✅ آپ کی درخواست بھیج دی گئی (نمبر {n})۔ انتظامیہ جائزہ لے گی۔",
-        "err_phone": "براہ کرم درست موبائل نمبر درج کریں۔", "err_amount": "براہ کرم رقم درج کریں۔",
         "err_dates": "آخری تاریخ شروع کے دن یا اس کے بعد ہونی چاہیے۔",
         "dup": "اس قسم کی ایک درخواست پہلے سے زیر جائزہ ہے۔",
         "my_title": "آپ کی درخواستیں", "none": "ابھی تک کوئی درخواست نہیں۔",
@@ -809,13 +915,10 @@ REQ = {
     },
     "bn": {
         "tab_perf": "📊 আমার পারফরম্যান্স", "tab_req": "📨 আমার অনুরোধ",
-        "title": "অনুরোধ", "sub": "ম্যানেজমেন্টকে অনুরোধ পাঠান এবং অবস্থা দেখুন",
-        "k_internet": "🌐 ইন্টারনেট", "k_advance": "💵 অগ্রিম", "k_leave": "🌴 ছুটি",
-        "h_internet": "ইন্টারনেটের অনুরোধ", "h_advance": "অগ্রিমের অনুরোধ", "h_leave": "ছুটির অনুরোধ",
-        "f_phone": "মোবাইল নম্বর", "f_phone_ph": "05xxxxxxxx", "f_note": "নোট (ঐচ্ছিক)",
-        "f_amount": "পরিমাণ (রিয়াল)", "f_from": "শুরু", "f_to": "শেষ", "submit": "অনুরোধ পাঠান",
+        "title": "ছুটির অনুরোধ", "sub": "ম্যানেজমেন্টকে ছুটির অনুরোধ পাঠান এবং অবস্থা দেখুন",
+        "h_leave": "ছুটির অনুরোধ",
+        "f_note": "নোট (ঐচ্ছিক)", "f_from": "শুরু", "f_to": "শেষ", "submit": "অনুরোধ পাঠান",
         "ok": "✅ আপনার অনুরোধ পাঠানো হয়েছে (নম্বর {n})। ম্যানেজমেন্ট পর্যালোচনা করবে।",
-        "err_phone": "অনুগ্রহ করে সঠিক মোবাইল নম্বর দিন।", "err_amount": "অনুগ্রহ করে পরিমাণ লিখুন।",
         "err_dates": "শেষ তারিখ শুরুর দিনে বা তার পরে হতে হবে।",
         "dup": "এই ধরনের একটি অনুরোধ ইতিমধ্যে পর্যালোচনাধীন আছে।",
         "my_title": "আপনার অনুরোধসমূহ", "none": "এখনো কোনো অনুরোধ নেই।",
@@ -844,6 +947,10 @@ def init_requests_db():
             created_at TEXT NOT NULL, updated_at TEXT, lang TEXT
         )
     """)
+    # ترقية الجدول القديم: عمود المشروع
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(requests)").fetchall()]
+    if "project" not in cols:
+        conn.execute("ALTER TABLE requests ADD COLUMN project TEXT DEFAULT 'hunger'")
     conn.commit()
     conn.close()
 
@@ -852,21 +959,23 @@ def now_ksa():
     return datetime.now(KSA_TZ).strftime("%Y-%m-%d %H:%M")
 
 
-def add_request(rider_id, rider_name, kind, amount=None, phone=None, date_from=None, date_to=None, note="", lang="en"):
+def add_request(rider_id, rider_name, kind, project="hunger", amount=None, phone=None,
+                date_from=None, date_to=None, note="", lang="en"):
     init_requests_db()
     conn = get_conn()
     cur = conn.execute(
         """INSERT INTO requests (rider_id, rider_name, kind, amount, phone, date_from, date_to, note,
-                                 status, created_at, updated_at, lang)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)""",
-        (str(rider_id), rider_name, kind, amount, phone, date_from, date_to, note, now_ksa(), now_ksa(), lang))
+                                 status, created_at, updated_at, lang, project)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)""",
+        (str(rider_id), rider_name, kind, amount, phone, date_from, date_to, note,
+         now_ksa(), now_ksa(), lang, project))
     conn.commit()
     new_id = cur.lastrowid
     conn.close()
     return new_id
 
 
-def list_requests(rider_id=None, status=None, kind=None, limit=500):
+def list_requests(rider_id=None, status=None, kind=None, project=None, limit=500):
     init_requests_db()
     q, params = "SELECT * FROM requests WHERE 1=1", []
     if rider_id:
@@ -878,12 +987,17 @@ def list_requests(rider_id=None, status=None, kind=None, limit=500):
     if kind:
         q += " AND kind = ?"
         params.append(kind)
+    if project:
+        q += " AND COALESCE(project, 'hunger') = ?"
+        params.append(project)
     q += " ORDER BY id DESC LIMIT ?"
     params.append(limit)
     conn = get_conn()
     conn.row_factory = sqlite3.Row
     rows = [dict(r) for r in conn.execute(q, params).fetchall()]
     conn.close()
+    for r in rows:
+        r["project"] = r.get("project") or "hunger"
     return rows
 
 
@@ -906,8 +1020,8 @@ def count_requests(status="pending"):
         return 0
 
 
-def has_pending(rider_id, kind):
-    return bool(list_requests(rider_id=rider_id, status="pending", kind=kind, limit=1))
+def has_pending(rider_id, kind, project):
+    return bool(list_requests(rider_id=rider_id, status="pending", kind=kind, project=project, limit=1))
 
 
 def detail_text(r, labels):
@@ -928,7 +1042,9 @@ def request_card(r, kind_label, status_label, labels, admin=False):
     bcolor = STATUS_COLOR.get(r["status"], "#64748b")
     who = ""
     if admin:
-        who = ('<div class="rq-who"><b>' + e(r.get("rider_name") or "—") + '</b><span>ID ' + e(str(r["rider_id"])) + "</span></div>")
+        proj_name = PROJECTS.get(r.get("project") or "hunger", PROJECTS["hunger"])["name"]
+        who = ('<div class="rq-who"><b>' + e(r.get("rider_name") or "—") + '</b><span>ID ' + e(str(r["rider_id"]))
+               + "</span><span>" + e(proj_name) + "</span></div>")
     note = ""
     if r.get("note"):
         note = '<div class="rq-note">📝 ' + e(r["note"]) + "</div>"
@@ -945,66 +1061,46 @@ def request_card(r, kind_label, status_label, labels, admin=False):
     )
 
 
-def rider_request_count(rider_id):
+def rider_request_count(rider_id, project):
     try:
-        return len(list_requests(rider_id=str(rider_id), limit=200))
+        return len(list_requests(rider_id=str(rider_id), project=project, limit=200))
     except Exception:
         return 0
 
 
-def render_requests_page(d, lang):
+def render_requests_page(d, lang, project):
     R = REQ[lang]
     e = html.escape
     rid = str(d["rider_id"])
     name = (d.get("rider_name") or "").strip()
+    kind = "leave"
 
-    st.markdown('<div class="rq-hero"><div class="rq-hero-t">📨 ' + e(R["title"]) + '</div><div class="rq-hero-s">'
+    st.markdown('<div class="rq-hero"><div class="rq-hero-t">🌴 ' + e(R["title"]) + '</div><div class="rq-hero-s">'
                 + e(R["sub"]) + "</div></div>", unsafe_allow_html=True)
 
-    kind = st.session_state.get("req_kind", "internet")
-    for col, k in zip(st.columns(3), KINDS):
-        if col.button(R["k_" + k], key="rk_" + k, type="primary" if kind == k else "secondary",
-                      use_container_width=True):
-            st.session_state["req_kind"] = k
-            st.rerun()
-
-    with st.form("req_form_" + kind, clear_on_submit=True):
-        st.markdown('<div class="rq-form-title" style="--c:' + KIND_COLOR[kind] + '">' + e(R["h_" + kind]) + "</div>",
+    with st.form("req_form_leave", clear_on_submit=True):
+        st.markdown('<div class="rq-form-title" style="--c:' + KIND_COLOR[kind] + '">' + e(R["h_leave"]) + "</div>",
                     unsafe_allow_html=True)
-        phone, amount, d_from, d_to = "", 0, None, None
-        if kind == "internet":
-            phone = st.text_input(R["f_phone"], placeholder=R["f_phone_ph"], key="rq_phone", max_chars=20)
-        elif kind == "advance":
-            amount = st.number_input(R["f_amount"], min_value=0, max_value=100000, value=0, step=50, key="rq_amount")
-        else:
-            c1, c2 = st.columns(2)
-            d_from = c1.date_input(R["f_from"], value=date.today(), min_value=date.today(), key="rq_from")
-            d_to = c2.date_input(R["f_to"], value=date.today(), min_value=date.today(), key="rq_to")
+        c1, c2 = st.columns(2)
+        d_from = c1.date_input(R["f_from"], value=date.today(), min_value=date.today(), key="rq_from")
+        d_to = c2.date_input(R["f_to"], value=date.today(), min_value=date.today(), key="rq_to")
         note = st.text_area(R["f_note"], height=80, max_chars=300, key="rq_note")
         sent = st.form_submit_button(R["submit"], type="primary", use_container_width=True)
 
     if sent:
-        digits = re.sub(r"\D", "", phone or "")
-        if kind == "internet" and not (8 <= len(digits) <= 15):
-            st.error(R["err_phone"])
-        elif kind == "advance" and not amount:
-            st.error(R["err_amount"])
-        elif kind == "leave" and d_to < d_from:
+        if d_to < d_from:
             st.error(R["err_dates"])
-        elif has_pending(rid, kind):
+        elif has_pending(rid, kind, project):
             st.warning(R["dup"])
         else:
             new_id = add_request(
-                rid, name, kind,
-                amount=float(amount) if kind == "advance" else None,
-                phone=(phone or "").strip() if kind == "internet" else None,
-                date_from=d_from.isoformat() if d_from else None,
-                date_to=d_to.isoformat() if d_to else None,
+                rid, name, kind, project=project,
+                date_from=d_from.isoformat(), date_to=d_to.isoformat(),
                 note=(note or "").strip(), lang=lang)
             st.success(R["ok"].format(n=new_id))
 
     st.markdown('<div class="section-title">' + e(R["my_title"]) + "</div>", unsafe_allow_html=True)
-    mine = list_requests(rider_id=rid, limit=50)
+    mine = list_requests(rider_id=rid, project=project, limit=50)
     if not mine:
         st.markdown('<div class="rq-empty">' + e(R["none"]) + "</div>", unsafe_allow_html=True)
     labels = {"sar": R["sar"], "days": R["days"], "admin_note": R["admin_note"]}
@@ -1016,8 +1112,8 @@ def admin_requests_ui():
     e = html.escape
     rows = list_requests(limit=1000)
     pend = [r for r in rows if r["status"] == "pending"]
-    by = lambda k: [r for r in pend if r["kind"] == k]
-    adv_sum = sum((r.get("amount") or 0) for r in by("advance"))
+    by_kind = lambda k: [r for r in pend if r["kind"] == k]
+    by_proj = lambda p: [r for r in pend if r["project"] == p]
 
     def kpi(label, value, sub, color):
         return ('<div class="rq-kpi" style="--c:' + color + '"><div class="rq-kpi-l">' + e(label) + '</div><div class="rq-kpi-v">'
@@ -1025,22 +1121,22 @@ def admin_requests_ui():
 
     st.markdown(
         '<div class="rq-kpis">'
-        + kpi("⏳ طلبات قيد المراجعة", len(pend), "كل الأنواع", "#f59e0b")
-        + kpi("🌐 إنترنت", len(by("internet")), "قيد المراجعة", KIND_COLOR["internet"])
-        + kpi("💵 سلف", len(by("advance")), "إجمالي " + f"{adv_sum:,.0f}" + " ريال", KIND_COLOR["advance"])
-        + kpi("🌴 إجازات", len(by("leave")), "قيد المراجعة", KIND_COLOR["leave"])
+        + kpi("⏳ طلبات قيد المراجعة", len(pend), "كل المشاريع", "#f59e0b")
+        + kpi("🌴 إجازات", len(by_kind("leave")), "قيد المراجعة", KIND_COLOR["leave"])
+        + kpi("🍔 HungerStation", len(by_proj("hunger")), "قيد المراجعة", "#7c3f2b")
+        + kpi("🟡 Keeta", len(by_proj("keeta")), "قيد المراجعة", "#eab308")
         + "</div>", unsafe_allow_html=True)
 
     f1, f2, f3 = st.columns([2, 2, 2])
     status_opts = {"⏳ قيد المراجعة": "pending", "✅ تمت الموافقة": "approved", "❌ مرفوضة": "rejected", "الكل": None}
     status_pick = f1.selectbox("الحالة", list(status_opts.keys()), key="rqa_status")
-    kind_opts = {"الكل": None, "🌐 إنترنت": "internet", "💵 سلفة": "advance", "🌴 إجازة": "leave"}
-    kind_pick = f2.selectbox("النوع", list(kind_opts.keys()), key="rqa_kind")
+    proj_opts = {"الكل": None, "HungerStation": "hunger", "Keeta": "keeta"}
+    proj_pick = f2.selectbox("المشروع", list(proj_opts.keys()), key="rqa_proj")
     q = f3.text_input("بحث بالـ ID أو الاسم", key="rqa_q").strip().lower()
 
     shown = [r for r in rows
              if (status_opts[status_pick] is None or r["status"] == status_opts[status_pick])
-             and (kind_opts[kind_pick] is None or r["kind"] == kind_opts[kind_pick])
+             and (proj_opts[proj_pick] is None or r["project"] == proj_opts[proj_pick])
              and (not q or q in str(r["rider_id"]).lower() or q in (r.get("rider_name") or "").lower())]
 
     if not shown:
@@ -1067,11 +1163,111 @@ def admin_requests_ui():
         st.caption("معروض أحدث 40 طلب من " + str(len(shown)) + " — استخدم الفلتر لتضييق النتائج.")
 
     if rows:
-        out = pd.DataFrame(rows)[["id", "created_at", "rider_id", "rider_name", "kind", "status", "amount",
-                                  "phone", "date_from", "date_to", "note", "admin_note"]]
+        out = pd.DataFrame(rows)[["id", "created_at", "project", "rider_id", "rider_name", "kind", "status",
+                                  "date_from", "date_to", "note", "admin_note"]]
         st.download_button("📥 تحميل كل الطلبات CSV", out.to_csv(index=False).encode("utf-8-sig"),
                            file_name="requests.csv", mime="text/csv", key="rqa_dl")
 
+
+# ============================================================
+# Rider page building blocks
+# ============================================================
+def reset_rider_view():
+    for k in ("last_id", "rider_view"):
+        st.session_state.pop(k, None)
+
+
+def render_project_chooser(lang):
+    C = CHOOSE[lang]
+    st.markdown(f"""
+    <div class="brand">
+        <div class="brand-icon">🏆</div>
+        <div class="brand-title">{html.escape(C["title"])}</div>
+        <div class="brand-subtitle">{html.escape(C["sub"])}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    cols = st.columns(2)
+    for col, key in zip(cols, ["keeta", "hunger"]):
+        P = PROJECTS[key]
+        with col:
+            if P["logo"].exists():
+                st.image(str(P["logo"]), width=170)
+            else:
+                st.markdown(f'<div class="proj-fallback">{html.escape(P["name"])}</div>', unsafe_allow_html=True)
+            if st.button(P["name"], key="pick_" + key, use_container_width=True, type="primary"):
+                st.session_state["project"] = key
+                reset_rider_view()
+                st.rerun()
+
+
+def render_profile(d, name, id_label, badge_label, badge_value, badge_color):
+    st.markdown(f"""
+    <div class="profile">
+        <div class="profile-name">{html.escape(name)}</div>
+        <div class="profile-id">{html.escape(id_label)}: {html.escape(str(d["rider_id"]))}</div>
+        <div style="margin-top:14px;color:#cbd5e1;font-size:13px;">{html.escape(badge_label)}</div>
+        <div style="display:inline-block;min-width:76px;text-align:center;border-radius:14px;padding:10px 18px;font-size:25px;font-weight:900;margin-top:4px;background:{badge_color};color:#ffffff;">{html.escape(badge_value)}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def render_cards(cards):
+    cols = st.columns(3)
+    for i, (label, value, color) in enumerate(cards):
+        style = f' style="color:{color};"' if color else ""
+        with cols[i % 3]:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-label">{html.escape(label)}</div>
+                <div class="metric-value"{style}>{html.escape(value)}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+
+def render_hunger_body(d, seg, T, lang):
+    render_segment_change(d, seg, T, CHANGE[lang])
+    render_target_status(d, TARGETMSG[lang])
+
+    st.markdown(f'<div class="section-title">{html.escape(T["overview"])}</div>', unsafe_allow_html=True)
+    render_cards([
+        (T["orders"], fmt_int(d["orders"]), None),
+        (T["in_time"], fmt_int(d["orders_in_time"]), None),
+        (T["late"], fmt_int(d["late_orders"]), None),
+        (T["acceptance"], fmt_pct(d["acceptance_rate"]), None),
+        (T["on_time"], fmt_pct(d["on_time_rate"]), None),
+        (T["verification"], fmt_pct(d["verification_rate"]), None),
+        (T["fail"], fmt_pct(d["fail_rate"]), None),
+        (T["final"], fmt_pct(d["final_score"]), None),
+        (T["segment"], seg, segment_color(seg)),
+    ])
+    render_tips(T, TIPS[lang])
+    st.markdown(f'<div class="footer-note">{html.escape(T["footer"])}</div>', unsafe_allow_html=True)
+
+
+def render_keeta_body(d, T, K):
+    st.markdown(f'<div class="section-title">{html.escape(T["overview"])}</div>', unsafe_allow_html=True)
+    valid_day = fmt_text(d.get("valid_day"))
+    level = fmt_text(d.get("level"))
+    render_cards([
+        (K["accepted"], fmt_int(d.get("accepted")), None),
+        (K["delivered"], fmt_int(d.get("delivered")), None),
+        (K["cancel"], fmt_int(d.get("cancel")), None),
+        (K["rejected"], fmt_int(d.get("rejected")), None),
+        (K["cancel_rate"], fmt_pct(d.get("cancel_rate")), None),
+        (K["on_time"], fmt_pct(d.get("on_time_rate")), None),
+        (K["late"], fmt_int(d.get("orders_late")), None),
+        (K["valid_days"], valid_day, None),
+        (K["level"], level, "#14b8a6" if level != "—" else None),
+    ])
+    if valid_day == "—" or level == "—":
+        st.markdown(f'<div class="tips-note">ℹ️ {html.escape(K["month_end"])}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="footer-note">{html.escape(K["footer"])}</div>', unsafe_allow_html=True)
+
+
+# ------------------------------------------------------------
+# Public page
+# ------------------------------------------------------------
 if page == "Rider Performance":
     lang_name = st.radio("Language", list(LANGS.keys()), horizontal=True,
                          key="lang", label_visibility="collapsed")
@@ -1081,21 +1277,41 @@ if page == "Rider Performance":
     if lang in RTL_LANGS:
         st.markdown("""
         <style>
-            .brand, .profile, .metric-card, .section-title, .footer-note, .tips, .seg-change, .tg-card, .rq-hero, .rq-card, .rq-form-title, .rq-empty,
+            .brand, .profile, .metric-card, .section-title, .footer-note, .tips, .tips-note, .seg-change, .tg-card, .rq-hero, .rq-card, .rq-form-title, .rq-empty,
             [data-testid="stForm"] {direction: rtl; text-align: right;}
             .brand {text-align: center;}
             .footer-note, .tips-closing {text-align: center;}
         </style>
         """, unsafe_allow_html=True)
 
+    # ---- الخطوة 1: اختيار المشروع ----
+    project = st.session_state.get("project")
+    if project not in PROJECTS:
+        render_project_chooser(lang)
+        st.stop()
+
+    P = PROJECTS[project]
+    CH = CHOOSE[lang]
+
+    tb1, tb2 = st.columns([1, 3])
+    with tb1:
+        if P["logo"].exists():
+            st.image(str(P["logo"]), width=64)
+    with tb2:
+        if st.button(CH["change"], key="chg_proj"):
+            st.session_state.pop("project", None)
+            reset_rider_view()
+            st.rerun()
+
     st.markdown(f"""
     <div class="brand">
         <div class="brand-icon">🏆</div>
-        <div class="brand-title">{html.escape(T["title"])}</div>
+        <div class="brand-title">{html.escape(T["title"])} — {html.escape(P["name"])}</div>
         <div class="brand-subtitle">{html.escape(T["subtitle"])}</div>
     </div>
     """, unsafe_allow_html=True)
 
+    # ---- الخطوة 2: إدخال الـ ID ----
     with st.form("rider_lookup"):
         rider_id = st.text_input(T["id_label"], placeholder=T["id_ph"]).strip()
         search = st.form_submit_button(T["btn"], use_container_width=True, type="primary")
@@ -1112,27 +1328,27 @@ if page == "Rider Performance":
     shown_id = st.session_state.get("last_id")
 
     if shown_id:
-        d = get_rider(shown_id)
+        d = get_rider(shown_id, project)
         if d is None:
             st.error(T["not_found"])
         else:
             name = (d.get("rider_name") or "").strip() or T["rider"]
-            seg = str(d.get("segment") or "").strip()
-            if seg.lower() in ("", "nan", "none"):
-                seg = "—"
 
-            st.markdown(f"""
-            <div class="profile">
-                <div class="profile-name">{html.escape(name)}</div>
-                <div class="profile-id">{html.escape(T["id_label"])}: {html.escape(str(d["rider_id"]))}</div>
-                <div style="margin-top:14px;color:#cbd5e1;font-size:13px;">{html.escape(T["segment"])}</div>
-                <div style="display:inline-block;min-width:76px;text-align:center;border-radius:14px;padding:10px 18px;font-size:25px;font-weight:900;margin-top:4px;background:{segment_color(seg)};color:#ffffff;">{html.escape(seg)}</div>
-            </div>
-            """, unsafe_allow_html=True)
+            if project == "hunger":
+                seg = str(d.get("segment") or "").strip()
+                if seg.lower() in ("", "nan", "none"):
+                    seg = "—"
+                render_profile(d, name, T["id_label"], T["segment"], seg, segment_color(seg))
+            else:
+                K = KTXT[lang]
+                level = fmt_text(d.get("level"))
+                render_profile(d, name, T["id_label"], K["level"], level,
+                               "#14b8a6" if level != "—" else "#64748b")
 
+            # تابات: الأداء / الطلبات (إجازات)
             RQ = REQ[lang]
             view = st.session_state.get("rider_view", "perf")
-            rq_n = rider_request_count(d["rider_id"])
+            rq_n = rider_request_count(d["rider_id"], project)
             vb1, vb2 = st.columns(2)
             if vb1.button(RQ["tab_perf"], key="vw_perf", use_container_width=True,
                           type="primary" if view == "perf" else "secondary"):
@@ -1143,48 +1359,116 @@ if page == "Rider Performance":
                 st.session_state["rider_view"] = "req"
                 st.rerun()
             if view == "req":
-                render_requests_page(d, lang)
+                render_requests_page(d, lang, project)
                 st.stop()
 
-            render_segment_change(d, seg, T, CHANGE[lang])
-            render_target_status(d, TARGETMSG[lang])
-
-            st.markdown(f'<div class="section-title">{html.escape(T["overview"])}</div>',
-                        unsafe_allow_html=True)
-
-            cards = [
-                (T["orders"], fmt_int(d["orders"]), None),
-                (T["in_time"], fmt_int(d["orders_in_time"]), None),
-                (T["late"], fmt_int(d["late_orders"]), None),
-                (T["acceptance"], fmt_pct(d["acceptance_rate"]), None),
-                (T["on_time"], fmt_pct(d["on_time_rate"]), None),
-                (T["verification"], fmt_pct(d["verification_rate"]), None),
-                (T["fail"], fmt_pct(d["fail_rate"]), None),
-                (T["final"], fmt_pct(d["final_score"]), None),
-                (T["segment"], seg, segment_color(seg)),
-            ]
-            cols = st.columns(3)
-            for i, (label, value, color) in enumerate(cards):
-                style = f' style="color:{color};"' if color else ""
-                with cols[i % 3]:
-                    st.markdown(f"""
-                    <div class="metric-card">
-                        <div class="metric-label">{html.escape(label)}</div>
-                        <div class="metric-value"{style}>{html.escape(value)}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-            render_tips(T, TIPS[lang])
-
-            st.markdown(
-                f'<div class="footer-note">{html.escape(T["footer"])}</div>',
-                unsafe_allow_html=True,
-            )
+            if project == "hunger":
+                render_hunger_body(d, seg, T, lang)
+            else:
+                render_keeta_body(d, T, KTXT[lang])
 
 # ------------------------------------------------------------
 # Admin page
 # ------------------------------------------------------------
-else:
+def admin_upload_hunger():
+    st.info("⚠️ أي رفع جديد لهنجر ستيشن هيمسح بيانات هنجر القديمة (كيتا مش هتتأثر).")
+
+    uploaded = st.file_uploader("Excel / CSV file", type=["xlsx", "xls", "csv"], key="up_hunger")
+    if not uploaded:
+        return
+
+    try:
+        if uploaded.name.lower().endswith(".csv"):
+            raw = pd.read_csv(uploaded)
+        else:
+            raw = pd.read_excel(uploaded)
+    except Exception as e:
+        st.error(f"Could not read the file: {e}")
+        return
+
+    st.success(f"File loaded — {len(raw):,} rows, {len(raw.columns)} columns.")
+
+    mapping = auto_map(raw.columns, FIELDS)
+    missing = [FIELDS[k][0] for k, v in mapping.items() if v is None]
+
+    if missing:
+        st.error("الملف ناقصه أعمدة: " + "، ".join(missing))
+        st.caption("الأعمدة المطلوبة: " + " | ".join(
+            ["rider_id", "Name", "chat with customer", "acceptance rate",
+             "verification_success_rate", "completed_orders", "completed_orders_in_time",
+             "Orders late", "failed_orders_by_rider", "on_time_delivery_score",
+             "fail_rate_score", "final_delivery_quality_score", "segment"]))
+        return
+
+    clean = build_clean_df(raw, mapping)
+
+    seg_counts = clean["segment"].value_counts().to_dict()
+    st.caption("Segment في الملف: " + " | ".join(f"{k}: {v}" for k, v in seg_counts.items()))
+    st.dataframe(clean.drop(columns=["uploaded_at"]).head(20),
+                 use_container_width=True, hide_index=True)
+
+    st.markdown("##### 🎯 إعدادات التارجت")
+    g1, g2 = st.columns(2)
+    tgt = g1.number_input("التارجت اليومي (طلب/يوم)", min_value=1, value=17, step=1)
+    days = g2.number_input("عدد الأيام اللي الشيت مغطيها (من أول الشهر)", min_value=1,
+                           max_value=31, value=max(datetime.now().day - 1, 1), step=1)
+    st.caption(f"المطلوب لحد دلوقتي من كل مندوب = {int(tgt)} × {int(days)} = {int(tgt) * int(days)} طلب")
+    clean["target_per_day"] = int(tgt)
+    clean["days_covered"] = int(days)
+
+    if st.button("💾 مسح القديم ورفع الجديد", type="primary", use_container_width=True, key="save_hunger"):
+        with_prev = replace_all_data(clean)
+        st.success(
+            f"✅ تم. البيانات القديمة اتمسحت واتحمّل {len(clean):,} رايدر "
+            f"({with_prev:,} منهم ليهم سيجمنت سابق)."
+        )
+
+
+def admin_upload_keeta():
+    st.info("⚠️ أي رفع جديد لكيتا هيمسح بيانات كيتا القديمة (هنجر ستيشن مش هتتأثر).")
+    st.caption("التيمبلت: id | name | accepted | Delivered Tasks | cancel | Rejected Tasks | "
+               "Cancellation Rate from Delivery Issues | Experience_On-time Rate (D) | orders late | valid day | level "
+               "— الـ valid day والـ level ممكن يكونوا فاضيين لحد آخر الشهر.")
+
+    uploaded = st.file_uploader("Keeta Excel / CSV file", type=["xlsx", "xls", "csv"], key="up_keeta")
+    if not uploaded:
+        return
+
+    try:
+        # dtype=str عشان الـ ID الطويل (16 رقم) ميتبوظش
+        if uploaded.name.lower().endswith(".csv"):
+            raw = pd.read_csv(uploaded, dtype=str)
+        else:
+            raw = pd.read_excel(uploaded, dtype=str)
+    except Exception as e:
+        st.error(f"Could not read the file: {e}")
+        return
+
+    st.success(f"File loaded — {len(raw):,} rows, {len(raw.columns)} columns.")
+
+    mapping = auto_map(raw.columns, KEETA_FIELDS)
+    if mapping["rider_id"] is None:
+        st.error("الملف مفيهوش عمود id.")
+        return
+
+    missing = [KEETA_FIELDS[k][0] for k, v in mapping.items() if v is None]
+    if missing:
+        st.warning("أعمدة مش موجودة في الملف (هتظهر 0 / —): " + "، ".join(missing))
+
+    clean = build_keeta_df(raw, mapping)
+
+    no_valid = int((clean["valid_day"] == "").sum())
+    no_level = int((clean["level"] == "").sum())
+    st.caption(f"الرايدرز: {len(clean):,} | من غير valid day: {no_valid:,} | من غير level: {no_level:,}")
+    st.dataframe(clean.drop(columns=["uploaded_at"]).head(20),
+                 use_container_width=True, hide_index=True)
+
+    if st.button("💾 مسح القديم ورفع الجديد", type="primary", use_container_width=True, key="save_keeta"):
+        replace_keeta_data(clean)
+        st.success(f"✅ تم. بيانات كيتا القديمة اتمسحت واتحمّل {len(clean):,} رايدر.")
+
+
+if page != "Rider Performance":
     if not admin_login():
         st.stop()
 
@@ -1194,60 +1478,16 @@ else:
                                              "📨 Requests" + (" (" + str(_pend) + ")" if _pend else "")])
 
     with tab_upload:
-        st.info("⚠️ أي رفع جديد هيمسح كل البيانات القديمة ويحط الملف الجديد مكانها.")
-
-        uploaded = st.file_uploader("Excel / CSV file", type=["xlsx", "xls", "csv"])
-
-        if uploaded:
-            try:
-                if uploaded.name.lower().endswith(".csv"):
-                    raw = pd.read_csv(uploaded)
-                else:
-                    raw = pd.read_excel(uploaded)
-            except Exception as e:
-                st.error(f"Could not read the file: {e}")
-                st.stop()
-
-            st.success(f"File loaded — {len(raw):,} rows, {len(raw.columns)} columns.")
-
-            mapping = auto_map(raw.columns)
-            missing = [FIELDS[k][0] for k, v in mapping.items() if v is None]
-
-            if missing:
-                st.error("الملف ناقصه أعمدة: " + "، ".join(missing))
-                st.caption("الأعمدة المطلوبة: " + " | ".join(
-                    ["rider_id", "Name", "chat with customer", "acceptance rate",
-                     "verification_success_rate", "completed_orders", "completed_orders_in_time",
-                     "Orders late", "failed_orders_by_rider", "on_time_delivery_score",
-                     "fail_rate_score", "final_delivery_quality_score", "segment"]))
-                st.stop()
-
-            clean = build_clean_df(raw, mapping)
-
-            if True:
-                seg_counts = clean["segment"].value_counts().to_dict()
-                st.caption("Segment في الملف: " + " | ".join(f"{k}: {v}" for k, v in seg_counts.items()))
-                st.dataframe(clean.drop(columns=["uploaded_at"]).head(20),
-                             use_container_width=True, hide_index=True)
-
-                st.markdown("##### 🎯 إعدادات التارجت")
-                g1, g2 = st.columns(2)
-                tgt = g1.number_input("التارجت اليومي (طلب/يوم)", min_value=1, value=17, step=1)
-                days = g2.number_input("عدد الأيام اللي الشيت مغطيها (من أول الشهر)", min_value=1,
-                                       max_value=31, value=max(datetime.now().day - 1, 1), step=1)
-                st.caption(f"المطلوب لحد دلوقتي من كل مندوب = {int(tgt)} × {int(days)} = {int(tgt) * int(days)} طلب")
-                clean["target_per_day"] = int(tgt)
-                clean["days_covered"] = int(days)
-
-                if st.button("💾 مسح القديم ورفع الجديد", type="primary", use_container_width=True):
-                    with_prev = replace_all_data(clean)
-                    st.success(
-                        f"✅ تم. البيانات القديمة اتمسحت واتحمّل {len(clean):,} رايدر "
-                        f"({with_prev:,} منهم ليهم سيجمنت سابق)."
-                    )
+        up_proj = st.radio("المشروع", ["Keeta", "HungerStation"], horizontal=True, key="up_proj")
+        if up_proj == "Keeta":
+            admin_upload_keeta()
+        else:
+            admin_upload_hunger()
 
     with tab_data:
-        current = get_all()
+        dp = st.radio("المشروع", ["Keeta", "HungerStation"], horizontal=True, key="data_proj")
+        dp_key = "keeta" if dp == "Keeta" else "hunger"
+        current = get_all(dp_key)
         if current.empty:
             st.info("No data uploaded yet.")
         else:
@@ -1258,7 +1498,7 @@ else:
             st.download_button(
                 "📥 Download Current Data",
                 data=current.to_csv(index=False).encode("utf-8-sig"),
-                file_name="rider_performance_current.csv",
+                file_name=f"{dp_key}_performance_current.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
