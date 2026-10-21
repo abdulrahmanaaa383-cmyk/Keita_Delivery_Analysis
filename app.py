@@ -1,8 +1,11 @@
+import copy
 import hmac
 import html
+import json
 import re
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
@@ -14,6 +17,8 @@ import streamlit.components.v1 as components
 # - المندوب يختار المشروع الأول (هنجر ستيشن / كيتا) وبعدين يدخل الـ ID
 # - كل رفع جديد بيمسح بيانات المشروع ده بس (المشروع التاني مش بيتأثر)
 # - الطلبات: إجازات فقط
+# - محرك تعليمات ذكي: كل مندوب بيشوف تعليمات على حسب أرقامه (تلقائي) + رسائل يدوية من الأدمن
+# - Admin Control Center: Dashboard / Riders / Coaching / Upload / Requests
 # ============================================================
 
 st.set_page_config(page_title="Rider Performance", page_icon="🏆", layout="centered")
@@ -52,12 +57,11 @@ FIELDS = {
 INT_COLS = ["orders", "orders_in_time", "late_orders", "failed_orders"]
 PCT_COLS = ["chat_rate", "acceptance_rate", "verification_rate", "on_time_rate", "fail_rate", "final_score"]
 
-# ---------------- Keeta fields (التيمبلت: id, name, accepted, Delivered Tasks, cancel,
-# Rejected Tasks, Cancellation Rate from Delivery Issues, Experience_On-time Rate (D),
-# orders late, valid day, level) ----------------
+# ---------------- Keeta fields ----------------
 KEETA_FIELDS = {
-    "rider_id":    ("id", True, ["id", "riderid", "courierid", "driverid"]),
-    "rider_name":  ("name", False, ["name", "ridername", "couriername", "drivername"]),
+    "rider_id":    ("id", True, ["id", "riderid", "courierid", "driverid", "captainid", "userid", "accountid",
+                                 "keetaid", "courieridkeeta"]),
+    "rider_name":  ("name", False, ["name", "ridername", "couriername", "drivername", "captainname"]),
     "accepted":    ("accepted", False, ["accepted", "acceptedtasks"]),
     "delivered":   ("Delivered Tasks", False, ["deliveredtasks", "delivered", "completedorders"]),
     "cancel":      ("cancel", False, ["cancel", "cancelled", "canceled"]),
@@ -77,14 +81,31 @@ KEETA_PCT = ["cancel_rate", "on_time_rate"]
 # ------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------
+AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
+
+
 def norm(text):
     # يشيل أي مسافات / رموز / أقواس عشان "Experience_On-time Rate (D)" يتعرف
     return re.sub(r"[\W_]+", "", str(text).strip().lower())
 
 
+def _fix_id(v):
+    v = str(v).strip().translate(AR_DIGITS)
+    if re.fullmatch(r"\d+(\.\d+)?[eE]\+?\d+", v):   # لو الإكسيل حوّل الـ ID لصيغة علمية
+        try:
+            v = str(int(Decimal(v)))
+        except Exception:
+            pass
+    return re.sub(r"\.0+$", "", v)
+
+
+def normalize_id_text(v):
+    return _fix_id(v)
+
+
 def clean_id(series):
-    s = series.astype(str).str.strip()
-    return s.str.replace(r"\.0$", "", regex=True)
+    s = series.fillna("").astype(str).map(_fix_id)
+    return s.replace({"nan": "", "None": "", "NaN": ""})
 
 
 def clean_text(series):
@@ -157,6 +178,20 @@ def get_conn():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 
+def init_aux_db():
+    conn = get_conn()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS coach_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project TEXT NOT NULL, scope TEXT NOT NULL,
+            rider_id TEXT, rule TEXT, title TEXT, body TEXT NOT NULL,
+            active INTEGER DEFAULT 1, created_at TEXT
+        )""")
+    conn.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)")
+    conn.commit()
+    conn.close()
+
+
 def replace_all_data(df):
     """هنجر: يمسح القديم ويحط الجديد، مع الاحتفاظ بآخر سيجمنت/مؤشرات لكل رايدر فقط."""
     conn = get_conn()
@@ -226,16 +261,90 @@ def get_all(project):
     return df
 
 
+init_aux_db()
+
+
 # ------------------------------------------------------------
-# Upload logic
+# Upload logic (قراءة ذكية + مطابقة أعمدة)
 # ------------------------------------------------------------
+def read_table(uploaded, fields):
+    """يقرأ Excel/CSV كنصوص، ويكتشف صف العناوين تلقائيًا (حتى لو مش أول صف)."""
+    name = uploaded.name.lower()
+    raw = None
+    if name.endswith(".csv"):
+        for enc in ("utf-8-sig", "utf-8", "cp1256", "latin-1"):
+            try:
+                uploaded.seek(0)
+                raw = pd.read_csv(uploaded, header=None, dtype=str, encoding=enc, keep_default_na=False)
+                break
+            except Exception:
+                continue
+        if raw is None:
+            raise ValueError("تعذّر قراءة ترميز ملف الـ CSV")
+    else:
+        uploaded.seek(0)
+        raw = pd.read_excel(uploaded, header=None, dtype=str)
+
+    raw = raw.fillna("")
+    aliases = {a for (_, _, al) in fields.values() for a in al}
+    best, best_score = 0, -1
+    for i in range(min(15, len(raw))):
+        score = sum(1 for c in raw.iloc[i].tolist() if norm(c) in aliases)
+        if score > best_score:
+            best, best_score = i, score
+
+    cols, seen = [], {}
+    for j, c in enumerate(raw.iloc[best].tolist()):
+        c = str(c).strip()
+        if not c or c.lower() == "nan":
+            c = f"Column {j + 1}"
+        if c in seen:
+            seen[c] += 1
+            c = f"{c}.{seen[c]}"
+        else:
+            seen[c] = 0
+        cols.append(c)
+
+    df = raw.iloc[best + 1:].reset_index(drop=True)
+    df.columns = cols
+    blank = df.apply(lambda s: s.astype(str).str.strip()).eq("").all(axis=1)
+    df = df.loc[~blank].reset_index(drop=True)
+    return df, best
+
+
 def auto_map(columns, fields=None):
     """يرجّع {field_key: اسم العمود في الإكسيل أو None}"""
     fields = fields or FIELDS
-    by_norm = {norm(c): c for c in columns}
+    by_norm = {}
+    for c in columns:
+        by_norm.setdefault(norm(c), c)
     mapping = {}
     for key, (_, _, aliases) in fields.items():
-        mapping[key] = next((by_norm[a] for a in aliases if a in by_norm), None)
+        hit = next((by_norm[a] for a in aliases if a in by_norm), None)
+        if hit is None and key == "rider_id":
+            # أي عمود اسمه بينتهي بـ id (Courier ID / Rider_ID ...) أو بيبدأ بـ id
+            for n, c in by_norm.items():
+                if (n.endswith("id") and n not in ("valid", "paid", "android", "void")) or \
+                        (n.startswith("id") and len(n) <= 4):
+                    hit = c
+                    break
+        mapping[key] = hit
+    return mapping
+
+
+def manual_map(raw, mapping, fields, prefix):
+    """لو في أعمدة مش اتعرفت تلقائي، الأدمن يختارها يدويًا."""
+    miss = [k for k, v in mapping.items() if v is None]
+    if not miss:
+        return mapping
+    none_label = "— لا يوجد —"
+    opts = [none_label] + list(raw.columns)
+    with st.expander("🧩 مطابقة الأعمدة يدويًا (للأعمدة اللي ما اتعرفتش)", expanded=mapping["rider_id"] is None):
+        for k in miss:
+            label = fields[k][0] + (" *" if fields[k][1] else "")
+            pick = st.selectbox(label, opts, key=f"{prefix}_map_{k}")
+            if pick != none_label:
+                mapping[k] = pick
     return mapping
 
 
@@ -244,16 +353,12 @@ def build_clean_df(raw, mapping):
     out["rider_id"] = clean_id(raw[mapping["rider_id"]])
 
     if mapping["rider_name"]:
-        out["rider_name"] = raw[mapping["rider_name"]].fillna("").astype(str).str.strip()
-        out["rider_name"] = out["rider_name"].replace("nan", "")
+        out["rider_name"] = clean_text(raw[mapping["rider_name"]])
     else:
         out["rider_name"] = ""
 
     for c in INT_COLS:
-        if mapping[c]:
-            out[c] = pd.to_numeric(raw[mapping[c]], errors="coerce").fillna(0).astype(int)
-        else:
-            out[c] = 0
+        out[c] = to_int_column(raw[mapping[c]]) if mapping[c] else 0
 
     # لو المتأخرة مش موجودة نحسبها
     if not mapping["late_orders"]:
@@ -297,6 +402,12 @@ def build_keeta_df(raw, mapping):
 # Admin auth
 # ------------------------------------------------------------
 def admin_password():
+    try:
+        pw = st.secrets.get("ADMIN_PASSWORD")
+        if pw:
+            return str(pw)
+    except Exception:
+        pass
     return "admin 444"
 
 
@@ -420,6 +531,22 @@ st.markdown("""
     .tips-avoid {background:#fef2f2; border:1px solid #fecaca; color:#991b1b; border-radius:14px;
                  padding:13px 15px; margin-top:16px; font-size:15px; line-height:1.7;}
     .tips-closing {margin-top:14px; font-weight:700; color:#0f172a; text-align:center;}
+
+    /* ---------- Smart coaching cards ---------- */
+    .co-wrap {margin-top:8px;}
+    .co-card {border-radius:18px; padding:16px 18px; margin-bottom:12px; border:1px solid; border-inline-start:6px solid;
+              box-shadow:0 5px 18px rgba(15,23,42,.05);}
+    .co-head {display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:6px;}
+    .co-title {font-size:17px; font-weight:800;}
+    .co-badge {border-radius:999px; padding:3px 11px; font-size:11px; font-weight:800; background:rgba(255,255,255,.75);}
+    .co-body {font-size:14.5px; line-height:1.75;}
+    .co-card ul {margin:4px 0 0; padding-inline-start:20px;}
+    .co-card li {margin:3px 0;}
+    .co-crit {background:#fef2f2; border-color:#fecaca; border-inline-start-color:#dc2626; color:#7f1d1d;}
+    .co-warn {background:#fffbeb; border-color:#fde68a; border-inline-start-color:#f59e0b; color:#78350f;}
+    .co-info {background:#eff6ff; border-color:#bfdbfe; border-inline-start-color:#2563eb; color:#1e3a8a;}
+    .co-good {background:#f0fdf4; border-color:#bbf7d0; border-inline-start-color:#16a34a; color:#14532d;}
+    .co-note {background:#faf5ff; border-color:#e9d5ff; border-inline-start-color:#9333ea; color:#581c87;}
 
 </style>
 """, unsafe_allow_html=True)
@@ -865,6 +992,493 @@ def render_target_status(d, M):
 
 
 # ============================================================
+# 🧠 محرك التعليمات الذكي (تلقائي + يدوي)
+# ============================================================
+DEFAULT_SETTINGS = {
+    "keeta": {"late_pct": 5.0, "on_time_min": 95.0, "rejected_max": 3, "cancel_max": 2,
+              "cancel_rate_max": 2.0, "low_orders": 60},
+    "hunger": {"late_pct": 5.0, "on_time_min": 98.0, "verification_min": 100.0, "fail_min": 100.0,
+               "acceptance_min": 90.0, "chat_min": 80.0},
+    "disabled": {"keeta": [], "hunger": []},
+}
+
+SETTING_LABELS = {
+    "keeta": {
+        "late_pct": "نسبة التأخير القصوى % (متأخر ÷ موصّل)",
+        "on_time_min": "أقل نسبة أون تايم %",
+        "rejected_max": "عدد الرفض اللي يبدأ عنده التحذير",
+        "cancel_max": "عدد الإلغاء اللي يبدأ عنده التحذير",
+        "cancel_rate_max": "نسبة الإلغاء القصوى %",
+        "low_orders": "الحد الأدنى للطلبات الموصلة",
+    },
+    "hunger": {
+        "late_pct": "نسبة التأخير القصوى % (متأخر ÷ طلبات)",
+        "on_time_min": "أقل نسبة أون تايم %",
+        "verification_min": "أقل نسبة تحقق %",
+        "fail_min": "أقل درجة Fail Order %",
+        "acceptance_min": "أقل نسبة قبول %",
+        "chat_min": "أقل نسبة تواصل مع العميل %",
+    },
+}
+
+RULE_AR = {
+    "late": "⏱️ تأخير", "reject": "⚠️ رفض متكرر", "accept": "⚠️ قبول ضعيف", "cancel": "🚫 إلغاء",
+    "fail": "❌ طلبات فاشلة", "verify": "🔐 تحقق", "chat": "💬 تواصل", "low": "📉 طلبات قليلة",
+}
+ISSUE_KEYS = list(RULE_AR.keys())
+PROJECT_RULES = {
+    "keeta": ["late", "reject", "cancel", "low"],
+    "hunger": ["late", "accept", "fail", "verify", "chat", "low"],
+}
+SEV_RANK = {"critical": 0, "warn": 1, "info": 2, "good": 3}
+
+
+class _Safe(dict):
+    def __missing__(self, key):
+        return "—"
+
+
+def load_settings():
+    s = copy.deepcopy(DEFAULT_SETTINGS)
+    try:
+        conn = get_conn()
+        row = conn.execute("SELECT value FROM app_settings WHERE key='coach'").fetchone()
+        conn.close()
+        if row:
+            saved = json.loads(row[0])
+            for p in ("keeta", "hunger"):
+                s[p].update(saved.get(p, {}))
+                s["disabled"][p] = saved.get("disabled", {}).get(p, [])
+    except Exception:
+        pass
+    return s
+
+
+def save_settings(s):
+    conn = get_conn()
+    conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('coach', ?)", (json.dumps(s),))
+    conn.commit()
+    conn.close()
+
+
+def _f(v, default=0.0):
+    x = to_float_safe(v)
+    return default if x is None else x
+
+
+def evaluate(d, project, S):
+    """يرجّع قايمة (rule_key, severity, ctx) مرتبة حسب الخطورة."""
+    P = S[project]
+    off = set(S["disabled"].get(project, []))
+    items = []
+
+    if project == "keeta":
+        deliv = int(_f(d.get("delivered")))
+        late = int(_f(d.get("orders_late")))
+        rej = int(_f(d.get("rejected")))
+        canc = int(_f(d.get("cancel")))
+        crate = _f(d.get("cancel_rate"))
+        ot = _f(d.get("on_time_rate"))
+        late_pct = (late / deliv * 100) if deliv > 0 else 0.0
+        ctx = {"late": late, "late_pct": f"{late_pct:.1f}", "on_time": f"{ot:.1f}", "rejected": rej,
+               "cancel": canc, "cancel_rate": f"{crate:.1f}", "orders": deliv,
+               "expected": int(P["low_orders"]), "missing": max(int(P["low_orders"]) - deliv, 0)}
+
+        if deliv > 0 and (late_pct > P["late_pct"] or (0 < ot < P["on_time_min"])):
+            crit = late_pct >= 2 * P["late_pct"] or (0 < ot < P["on_time_min"] - 5)
+            items.append(("late", "critical" if crit else "warn", ctx))
+        if P["rejected_max"] > 0 and rej >= P["rejected_max"]:
+            items.append(("reject", "critical", ctx))
+        if (P["cancel_max"] > 0 and canc >= P["cancel_max"]) or crate > P["cancel_rate_max"]:
+            crit = canc >= 2 * P["cancel_max"] or crate >= 2 * P["cancel_rate_max"]
+            items.append(("cancel", "critical" if crit else "warn", ctx))
+        if P["low_orders"] > 0 and deliv < P["low_orders"]:
+            items.append(("low", "warn", ctx))
+    else:
+        orders = int(_f(d.get("orders")))
+        late = int(_f(d.get("late_orders")))
+        failed = int(_f(d.get("failed_orders")))
+        ot = _f(d.get("on_time_rate"))
+        ver = _f(d.get("verification_rate"))
+        frate = _f(d.get("fail_rate"))
+        acc = _f(d.get("acceptance_rate"))
+        chat = _f(d.get("chat_rate"))
+        late_pct = (late / orders * 100) if orders > 0 else 0.0
+        t = int(_f(d.get("target_per_day")))
+        days = int(_f(d.get("days_covered")))
+        expected = t * days
+        ctx = {"late": late, "late_pct": f"{late_pct:.1f}", "on_time": f"{ot:.1f}", "failed": failed,
+               "fail_rate": f"{frate:.1f}", "verification": f"{ver:.1f}", "acceptance": f"{acc:.1f}",
+               "chat": f"{chat:.1f}", "orders": orders, "expected": expected,
+               "missing": max(expected - orders, 0)}
+
+        if orders > 0 and (late_pct > P["late_pct"] or (0 < ot < P["on_time_min"])):
+            items.append(("late", "critical" if (0 < ot < P["on_time_min"] - 5) else "warn", ctx))
+        if 0 < acc < P["acceptance_min"]:
+            items.append(("accept", "critical" if acc < P["acceptance_min"] - 15 else "warn", ctx))
+        if failed > 0 or 0 < frate < P["fail_min"]:
+            crit = failed >= 3 or (0 < frate < P["fail_min"] - 5)
+            items.append(("fail", "critical" if crit else "warn", ctx))
+        if 0 < ver < P["verification_min"]:
+            items.append(("verify", "warn", ctx))
+        if 0 < chat < P["chat_min"]:
+            items.append(("chat", "info", ctx))
+        if expected > 0 and orders < expected:
+            items.append(("low", "warn", ctx))
+
+    items = [i for i in items if i[0] not in off]
+    base_ctx = items[0][2] if items else {}
+    if any(k in ("late", "reject", "accept", "cancel", "fail") for k, _, _ in items):
+        items.append(("proof", "info", base_ctx))
+    if not any(s in ("critical", "warn") for _, s, _ in items):
+        items.append(("good", "good", base_ctx))
+    items.sort(key=lambda x: SEV_RANK[x[1]])
+    return items
+
+
+COACH_UI = {
+    "en": {"title": "📌 Your personal instructions", "mgmt": "Message from management",
+           "critical": "Urgent", "warn": "Warning", "info": "Tip", "good": "Great"},
+    "ar": {"title": "📌 تعليمات خاصة بك", "mgmt": "رسالة من الإدارة",
+           "critical": "عاجل", "warn": "تنبيه", "info": "نصيحة", "good": "ممتاز"},
+    "ur": {"title": "📌 آپ کے لیے خصوصی ہدایات", "mgmt": "انتظامیہ کا پیغام",
+           "critical": "فوری", "warn": "انتباہ", "info": "مشورہ", "good": "بہترین"},
+    "bn": {"title": "📌 আপনার জন্য বিশেষ নির্দেশনা", "mgmt": "ম্যানেজমেন্টের বার্তা",
+           "critical": "জরুরি", "warn": "সতর্কতা", "info": "পরামর্শ", "good": "চমৎকার"},
+}
+
+COACH = {
+    "late": {
+        "ar": ("⏱️ انتبه لوقت التوصيل", [
+            "نسبة تأخيرك {late_pct}% ({late} طلب متأخر) والتوصيل في الوقت {on_time}%.",
+            "بعد استلام الطلب اتحرك فورًا ولا تتأخر في المطعم، وإذا الطلب متأخر بلّغ العميل والدعم.",
+            "أرسل للعميل رسالة في الشات: عند المطعم، وبعد الاستلام، وعند الوصول له.",
+            "اختر أقصر طريق وراقب المسافة، وإذا وجدت زحمة صوّرها وأرسلها للعميل.",
+        ]),
+        "en": ("⏱️ Watch your delivery time", [
+            "Your late rate is {late_pct}% ({late} late orders) and on-time is {on_time}%.",
+            "Leave the restaurant right after pickup; if the order is delayed, tell the customer and support.",
+            "Message the customer in chat: at the restaurant, after pickup, and on arrival.",
+            "Take the shortest route, track the distance, and photograph any traffic and send it to the customer.",
+        ]),
+        "ur": ("⏱️ ڈیلیوری کے وقت کا خیال رکھیں", [
+            "آپ کی تاخیر کی شرح {late_pct}% ({late} لیٹ آرڈرز) اور بروقت ڈیلیوری {on_time}% ہے۔",
+            "آرڈر لینے کے فوراً بعد نکلیں؛ تاخیر ہو تو کسٹمر اور سپورٹ کو بتائیں۔",
+            "ریسٹورنٹ پہنچ کر، آرڈر لینے کے بعد اور کسٹمر کے پاس پہنچ کر چیٹ میں پیغام بھیجیں۔",
+            "مختصر راستہ چنیں، اور ٹریفک ہو تو تصویر لے کر کسٹمر کو بھیجیں۔",
+        ]),
+        "bn": ("⏱️ ডেলিভারির সময়ের দিকে খেয়াল রাখুন", [
+            "আপনার দেরির হার {late_pct}% ({late}টি দেরি অর্ডার) এবং সময়মতো ডেলিভারি {on_time}%।",
+            "অর্ডার নেওয়ার পরপরই রওনা দিন; দেরি হলে কাস্টমার ও সাপোর্টকে জানান।",
+            "রেস্টুরেন্টে পৌঁছে, অর্ডার নেওয়ার পর এবং কাস্টমারের কাছে পৌঁছে চ্যাটে মেসেজ দিন।",
+            "সবচেয়ে ছোট রাস্তা বেছে নিন, যানজট হলে ছবি তুলে কাস্টমারকে পাঠান।",
+        ]),
+    },
+    "reject": {
+        "ar": ("⚠️ الرفض المتكرر يعرّض حسابك للإيقاف", [
+            "رفضت {rejected} مهمة.",
+            "الرفض المتكرر قد يعرّض حسابك للإيقاف، وقد يتم الخصم عليك مبالغ مالية.",
+            "اقبل فقط الطلبات التي تستطيع تنفيذها، وإذا كان عندك ظرف بلّغ الدعم بدل الرفض.",
+            "الطلبات المقبولة والمنفذة بسرعة ترفع مستواك وتزيد الطلبات اللي تجيك.",
+        ]),
+        "en": ("⚠️ Repeated rejections put your account at risk", [
+            "You rejected {rejected} tasks.",
+            "Repeated rejections can get your account suspended and money may be deducted from you.",
+            "Only accept orders you can complete; if you have a problem, contact support instead of rejecting.",
+            "Accepted and fast-delivered orders raise your level and bring you more orders.",
+        ]),
+        "ur": ("⚠️ بار بار مسترد کرنا آپ کے اکاؤنٹ کو خطرے میں ڈالتا ہے", [
+            "آپ نے {rejected} ٹاسکس مسترد کیے۔",
+            "بار بار مسترد کرنے سے اکاؤنٹ معطل ہو سکتا ہے اور رقم کٹ سکتی ہے۔",
+            "صرف وہی آرڈر قبول کریں جو آپ مکمل کر سکیں؛ مسئلہ ہو تو مسترد کرنے کے بجائے سپورٹ کو بتائیں۔",
+            "قبول اور جلد ڈیلیور ہونے والے آرڈرز آپ کا لیول بڑھاتے ہیں۔",
+        ]),
+        "bn": ("⚠️ বারবার রিজেক্ট করলে আপনার অ্যাকাউন্ট ঝুঁকিতে পড়ে", [
+            "আপনি {rejected}টি টাস্ক রিজেক্ট করেছেন।",
+            "বারবার রিজেক্ট করলে অ্যাকাউন্ট স্থগিত হতে পারে এবং টাকা কাটা যেতে পারে।",
+            "শুধু যে অর্ডার করতে পারবেন সেটাই গ্রহণ করুন; সমস্যা হলে রিজেক্ট না করে সাপোর্টকে জানান।",
+            "গৃহীত ও দ্রুত ডেলিভারি করা অর্ডার আপনার লেভেল বাড়ায়।",
+        ]),
+    },
+    "accept": {
+        "ar": ("⚠️ نسبة القبول منخفضة", [
+            "نسبة القبول عندك {acceptance}%.",
+            "رفض الطلبات بشكل متكرر قد يعرّض حسابك للإيقاف، وقد يتم الخصم عليك مبالغ مالية.",
+            "اقبل الطلبات بسرعة، وإذا كان عندك ظرف بلّغ الدعم بدل تجاهل الطلب.",
+            "القبول العالي يرفع الـ Segment ويزيد الطلبات اللي تجيك.",
+        ]),
+        "en": ("⚠️ Your acceptance rate is low", [
+            "Your acceptance rate is {acceptance}%.",
+            "Repeatedly rejecting orders can get your account suspended and money may be deducted.",
+            "Accept orders quickly; if you have a problem, contact support instead of ignoring the order.",
+            "A high acceptance rate raises your Segment and brings you more orders.",
+        ]),
+        "ur": ("⚠️ آپ کی قبولیت کی شرح کم ہے", [
+            "آپ کی قبولیت کی شرح {acceptance}% ہے۔",
+            "بار بار آرڈر مسترد کرنے سے اکاؤنٹ معطل ہو سکتا ہے اور رقم کٹ سکتی ہے۔",
+            "آرڈر جلدی قبول کریں؛ مسئلہ ہو تو آرڈر نظر انداز کرنے کے بجائے سپورٹ کو بتائیں۔",
+            "زیادہ قبولیت سے آپ کا سیگمنٹ بڑھتا ہے۔",
+        ]),
+        "bn": ("⚠️ আপনার অ্যাক্সেপ্টেন্স রেট কম", [
+            "আপনার অ্যাক্সেপ্টেন্স রেট {acceptance}%।",
+            "বারবার অর্ডার রিজেক্ট করলে অ্যাকাউন্ট স্থগিত হতে পারে এবং টাকা কাটা যেতে পারে।",
+            "দ্রুত অর্ডার গ্রহণ করুন; সমস্যা হলে অর্ডার উপেক্ষা না করে সাপোর্টকে জানান।",
+            "উচ্চ অ্যাক্সেপ্টেন্স রেট আপনার সেগমেন্ট বাড়ায়।",
+        ]),
+    },
+    "cancel": {
+        "ar": ("🚫 تجنّب الإلغاء بسبب مشاكل التوصيل", [
+            "عندك {cancel} طلب ملغي ونسبة الإلغاء {cancel_rate}%.",
+            "قبل أي إلغاء: اتصل بالعميل أكثر من مرة وراسله في الشات وانتظر المدة المطلوبة.",
+            "تأكد من العنوان والموقع على الخريطة قبل التحرك، واسأل العميل لو في أي غموض.",
+            "إذا ما رد العميل، صوّر المبنى ولقطة الاتصالات كإثبات، ولا تلغي إلا بعد الرجوع للدعم.",
+            "الإلغاء المتكرر يؤثر على مستواك وقد يعرضك لخصومات.",
+        ]),
+        "en": ("🚫 Avoid cancellations caused by delivery issues", [
+            "You have {cancel} cancelled orders and a cancellation rate of {cancel_rate}%.",
+            "Before cancelling: call the customer more than once, message in chat, and wait the required time.",
+            "Check the address and the map location before moving, and ask the customer if anything is unclear.",
+            "If the customer doesn't answer, photograph the building and your call log as proof, and cancel only after contacting support.",
+            "Repeated cancellations hurt your level and may lead to deductions.",
+        ]),
+        "ur": ("🚫 ڈیلیوری مسائل کی وجہ سے منسوخی سے بچیں", [
+            "آپ کے {cancel} آرڈرز منسوخ ہیں اور منسوخی کی شرح {cancel_rate}% ہے۔",
+            "منسوخ کرنے سے پہلے: کسٹمر کو کئی بار کال کریں، چیٹ میں پیغام بھیجیں اور مطلوبہ وقت انتظار کریں۔",
+            "روانہ ہونے سے پہلے ایڈریس اور نقشے کی لوکیشن چیک کریں۔",
+            "کسٹمر جواب نہ دے تو عمارت اور کال لاگ کی تصویر ثبوت کے طور پر لیں، اور سپورٹ سے رابطے کے بعد ہی منسوخ کریں۔",
+            "بار بار منسوخی آپ کے لیول کو متاثر کرتی ہے اور کٹوتی ہو سکتی ہے۔",
+        ]),
+        "bn": ("🚫 ডেলিভারি সমস্যার কারণে বাতিল এড়িয়ে চলুন", [
+            "আপনার {cancel}টি অর্ডার বাতিল হয়েছে এবং বাতিলের হার {cancel_rate}%।",
+            "বাতিল করার আগে: কাস্টমারকে একাধিকবার ফোন করুন, চ্যাটে মেসেজ দিন এবং নির্ধারিত সময় অপেক্ষা করুন।",
+            "রওনা দেওয়ার আগে ঠিকানা ও ম্যাপের লোকেশন যাচাই করুন।",
+            "কাস্টমার সাড়া না দিলে ভবনের ছবি ও কল লগ প্রমাণ হিসেবে রাখুন, এবং সাপোর্টের সাথে কথা বলেই বাতিল করুন।",
+            "বারবার বাতিল করলে আপনার লেভেল কমে এবং টাকা কাটা যেতে পারে।",
+        ]),
+    },
+    "fail": {
+        "ar": ("❌ الطلبات الفاشلة", [
+            "عندك {failed} طلب فاشل ودرجة الفشل {fail_rate}% (المطلوب 100%).",
+            "لا تترك أي طلب بدون تسليم؛ تواصل مع العميل والدعم قبل أي قرار.",
+            "سلّم الطلب للعميل وصوّر إثبات التسليم دائمًا.",
+        ]),
+        "en": ("❌ Failed orders", [
+            "You have {failed} failed orders and a fail score of {fail_rate}% (target 100%).",
+            "Never leave an order undelivered; contact the customer and support before any decision.",
+            "Hand the order to the customer and always photograph the proof of delivery.",
+        ]),
+        "ur": ("❌ ناکام آرڈرز", [
+            "آپ کے {failed} آرڈرز ناکام ہیں اور اسکور {fail_rate}% ہے (ہدف 100%)۔",
+            "کوئی آرڈر بغیر ڈیلیوری نہ چھوڑیں؛ فیصلے سے پہلے کسٹمر اور سپورٹ سے رابطہ کریں۔",
+            "آرڈر کسٹمر کو دیں اور ڈیلیوری کا ثبوت ہمیشہ تصویر میں رکھیں۔",
+        ]),
+        "bn": ("❌ ব্যর্থ অর্ডার", [
+            "আপনার {failed}টি ব্যর্থ অর্ডার এবং স্কোর {fail_rate}% (লক্ষ্য 100%)।",
+            "কোনো অর্ডার ডেলিভারি ছাড়া ফেলে রাখবেন না; সিদ্ধান্তের আগে কাস্টমার ও সাপোর্টের সাথে যোগাযোগ করুন।",
+            "অর্ডার কাস্টমারকে দিন এবং ডেলিভারির প্রমাণের ছবি সবসময় রাখুন।",
+        ]),
+    },
+    "verify": {
+        "ar": ("🔐 ارفع نسبة التحقق", [
+            "نسبة التحقق عندك {verification}% والمطلوب 100%.",
+            "أكمل خطوة التحقق/تأكيد التسليم في التطبيق لكل طلب فور التسليم.",
+            "تأكد من تسليم الطلب لصاحب الطلب نفسه.",
+        ]),
+        "en": ("🔐 Raise your verification rate", [
+            "Your verification rate is {verification}%; the target is 100%.",
+            "Complete the verification / delivery confirmation step in the app for every order right after delivery.",
+            "Make sure you hand the order to the person who placed it.",
+        ]),
+        "ur": ("🔐 اپنی تصدیق کی شرح بڑھائیں", [
+            "آپ کی تصدیق کی شرح {verification}% ہے؛ ہدف 100% ہے۔",
+            "ہر آرڈر کی ڈیلیوری کے فوراً بعد ایپ میں تصدیق کا مرحلہ مکمل کریں۔",
+            "آرڈر اسی شخص کو دیں جس نے آرڈر کیا ہے۔",
+        ]),
+        "bn": ("🔐 ভেরিফিকেশন রেট বাড়ান", [
+            "আপনার ভেরিফিকেশন রেট {verification}%; লক্ষ্য 100%।",
+            "প্রতিটি অর্ডার ডেলিভারির পরপরই অ্যাপে ভেরিফিকেশন ধাপ সম্পন্ন করুন।",
+            "যিনি অর্ডার করেছেন তাকেই অর্ডার হস্তান্তর করুন।",
+        ]),
+    },
+    "chat": {
+        "ar": ("💬 تواصل مع العميل", [
+            "نسبة تواصلك مع العميل {chat}%.",
+            "افتح الشات في كل طلب وأرسل الرسائل الثلاث: عند المطعم، بعد الاستلام، وعند الوصول.",
+        ]),
+        "en": ("💬 Talk to the customer", [
+            "Your chat-with-customer rate is {chat}%.",
+            "Open the chat on every order and send the three messages: at the restaurant, after pickup, and on arrival.",
+        ]),
+        "ur": ("💬 کسٹمر سے رابطہ کریں", [
+            "کسٹمر سے آپ کی چیٹ کی شرح {chat}% ہے۔",
+            "ہر آرڈر میں چیٹ کھولیں اور تین پیغام بھیجیں: ریسٹورنٹ پر، آرڈر لینے کے بعد، اور پہنچنے پر۔",
+        ]),
+        "bn": ("💬 কাস্টমারের সাথে যোগাযোগ করুন", [
+            "কাস্টমারের সাথে আপনার চ্যাট রেট {chat}%।",
+            "প্রতিটি অর্ডারে চ্যাট খুলুন এবং তিনটি মেসেজ দিন: রেস্টুরেন্টে, অর্ডার নেওয়ার পর, এবং পৌঁছে।",
+        ]),
+    },
+    "low": {
+        "ar": ("📉 عدد طلباتك قليل", [
+            "طلباتك {orders} والمطلوب {expected} (ناقصك {missing}).",
+            "افتح التطبيق أونلاين في أوقات الذروة: الغداء 12–4 والعشاء 7–12.",
+            "قف قرب مناطق المطاعم المزدحمة بدل الأماكن البعيدة.",
+            "اقبل الطلبات بسرعة وتجنب الرفض عشان تصلك طلبات أكثر.",
+            "زد عدد ساعات وأيام عملك في الأسبوع.",
+        ]),
+        "en": ("📉 Your order count is low", [
+            "You have {orders} orders and the required number is {expected} (missing {missing}).",
+            "Go online during peak hours: lunch 12–4 PM and dinner 7 PM–12 AM.",
+            "Stay near busy restaurant areas instead of remote spots.",
+            "Accept orders quickly and avoid rejecting so you receive more orders.",
+            "Increase your working hours and working days per week.",
+        ]),
+        "ur": ("📉 آپ کے آرڈرز کم ہیں", [
+            "آپ کے {orders} آرڈرز ہیں اور مطلوبہ تعداد {expected} ہے ({missing} کم)۔",
+            "پیک اوقات میں آن لائن رہیں: دوپہر 12–4 اور رات 7–12۔",
+            "دور دراز جگہوں کے بجائے مصروف ریسٹورنٹ علاقوں کے قریب رہیں۔",
+            "آرڈر جلدی قبول کریں اور مسترد کرنے سے بچیں تاکہ زیادہ آرڈرز ملیں۔",
+            "اپنے کام کے گھنٹے اور دن بڑھائیں۔",
+        ]),
+        "bn": ("📉 আপনার অর্ডার সংখ্যা কম", [
+            "আপনার অর্ডার {orders}টি এবং প্রয়োজন {expected}টি ({missing}টি কম)।",
+            "ব্যস্ত সময়ে অনলাইন থাকুন: দুপুর ১২–৪ এবং রাত ৭–১২।",
+            "দূরের জায়গার বদলে ব্যস্ত রেস্টুরেন্ট এলাকার কাছে থাকুন।",
+            "দ্রুত অর্ডার গ্রহণ করুন এবং রিজেক্ট এড়িয়ে চলুন যাতে বেশি অর্ডার পান।",
+            "সপ্তাহে কাজের ঘণ্টা ও দিন বাড়ান।",
+        ]),
+    },
+    "proof": {
+        "ar": ("📸 دايمًا خلّي معاك إثبات", [
+            "صوّر الطلب، ولقطة شاشة للمسافة والشات، وصورة الزحمة والمبنى.",
+            "لو جاتلك مخالفة أو الشركة أرسلت لك إيميل، الإثبات هو اللي يحميك.",
+            "احتفظ بالصور والمحادثات حتى نهاية الشهر على الأقل.",
+        ]),
+        "en": ("📸 Always keep proof", [
+            "Photograph the order, screenshot the distance and chat, and photograph traffic and the building.",
+            "If you get a violation or the company emails you, your proof is what protects you.",
+            "Keep the photos and chats until the end of the month at least.",
+        ]),
+        "ur": ("📸 ہمیشہ ثبوت اپنے پاس رکھیں", [
+            "آرڈر کی تصویر، فاصلے اور چیٹ کا اسکرین شاٹ، اور ٹریفک و عمارت کی تصویر لیں۔",
+            "اگر خلاف ورزی ملے یا کمپنی ای میل بھیجے تو آپ کا ثبوت ہی آپ کی حفاظت کرتا ہے۔",
+            "تصاویر اور چیٹس کم از کم مہینے کے آخر تک محفوظ رکھیں۔",
+        ]),
+        "bn": ("📸 সবসময় প্রমাণ রাখুন", [
+            "অর্ডারের ছবি, দূরত্ব ও চ্যাটের স্ক্রিনশট এবং যানজট ও ভবনের ছবি তুলুন।",
+            "জরিমানা বা কোম্পানির ইমেইল এলে আপনার প্রমাণই আপনাকে রক্ষা করবে।",
+            "ছবি ও চ্যাট অন্তত মাসের শেষ পর্যন্ত সংরক্ষণ করুন।",
+        ]),
+    },
+    "good": {
+        "ar": ("🌟 أداء ممتاز", [
+            "أداؤك ممتاز حاليًا، استمر على نفس المستوى.",
+            "كمّل بتصوير الإثباتات وإرسال رسائل الشات في كل طلب.",
+        ]),
+        "en": ("🌟 Excellent performance", [
+            "Your performance is excellent right now — keep it up.",
+            "Keep taking proof photos and sending chat messages on every order.",
+        ]),
+        "ur": ("🌟 بہترین کارکردگی", [
+            "آپ کی کارکردگی فی الحال بہترین ہے، اسی طرح جاری رکھیں۔",
+            "ہر آرڈر پر ثبوت کی تصاویر اور چیٹ پیغامات بھیجتے رہیں۔",
+        ]),
+        "bn": ("🌟 চমৎকার পারফরম্যান্স", [
+            "আপনার পারফরম্যান্স এখন চমৎকার, এভাবেই চালিয়ে যান।",
+            "প্রতিটি অর্ডারে প্রমাণের ছবি তুলুন এবং চ্যাটে মেসেজ দিন।",
+        ]),
+    },
+}
+
+SEV_CSS = {"critical": "co-crit", "warn": "co-warn", "info": "co-info", "good": "co-good"}
+
+
+# ---------------- الرسائل اليدوية (من الأدمن) ----------------
+def add_note(project, scope, rider_id, rule, title, body):
+    conn = get_conn()
+    conn.execute(
+        """INSERT INTO coach_notes (project, scope, rider_id, rule, title, body, active, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, 1, ?)""",
+        (project, scope, rider_id, rule, title.strip(), body.strip(), datetime.now().strftime("%Y-%m-%d %H:%M")))
+    conn.commit()
+    conn.close()
+
+
+def list_notes(project=None, rider_id=None):
+    q, params = "SELECT * FROM coach_notes WHERE 1=1", []
+    if project:
+        q += " AND project = ?"
+        params.append(project)
+    if rider_id:
+        q += " AND scope = 'rider' AND rider_id = ?"
+        params.append(str(rider_id))
+    q += " ORDER BY id DESC"
+    conn = get_conn()
+    conn.row_factory = sqlite3.Row
+    rows = [dict(r) for r in conn.execute(q, params).fetchall()]
+    conn.close()
+    return rows
+
+
+def set_note_active(note_id, active):
+    conn = get_conn()
+    conn.execute("UPDATE coach_notes SET active = ? WHERE id = ?", (1 if active else 0, int(note_id)))
+    conn.commit()
+    conn.close()
+
+
+def delete_note(note_id):
+    conn = get_conn()
+    conn.execute("DELETE FROM coach_notes WHERE id = ?", (int(note_id),))
+    conn.commit()
+    conn.close()
+
+
+def notes_for(project, rider_id, triggered):
+    out = []
+    for n in list_notes(project=project):
+        if not n["active"]:
+            continue
+        if n["scope"] == "all":
+            out.append(n)
+        elif n["scope"] == "rider" and str(n["rider_id"]) == str(rider_id):
+            out.append(n)
+        elif n["scope"] == "rule" and n["rule"] in triggered:
+            out.append(n)
+    return out
+
+
+def render_coaching(items, notes, lang):
+    if not items and not notes:
+        return
+    CU = COACH_UI[lang]
+    e = html.escape
+    dr = "rtl" if lang in RTL_LANGS else "ltr"
+    parts = []
+    for n in notes:
+        parts.append(
+            '<div class="co-card co-note"><div class="co-head"><span class="co-title">📩 '
+            + e(n.get("title") or CU["mgmt"]) + '</span><span class="co-badge">' + e(CU["mgmt"])
+            + '</span></div><div class="co-body">' + e(n["body"]).replace("\n", "<br>") + "</div></div>")
+    for key, sev, ctx in items:
+        title, lines = COACH[key][lang]
+        li = "".join("<li>" + e(l.format_map(_Safe(ctx))) + "</li>" for l in lines)
+        parts.append(
+            '<div class="co-card ' + SEV_CSS[sev] + '"><div class="co-head"><span class="co-title">' + e(title)
+            + '</span><span class="co-badge">' + e(CU[sev]) + '</span></div><div class="co-body"><ul>'
+            + li + "</ul></div></div>")
+    st.markdown('<div class="section-title" dir="' + dr + '">' + e(CU["title"]) + "</div>"
+                '<div class="co-wrap" dir="' + dr + '">' + "".join(parts) + "</div>", unsafe_allow_html=True)
+
+
+def render_rider_coaching(d, project, lang):
+    S = load_settings()
+    items = evaluate(d, project, S)
+    notes = notes_for(project, d["rider_id"], [k for k, _, _ in items])
+    render_coaching(items, notes, lang)
+
+
+# ============================================================
 # 📨 نظام الطلبات: إجازات فقط
 # المندوب يبعت من صفحته، والأدمن يشوفها ويوافق أو يرفض من تاب Requests
 # ============================================================
@@ -1225,12 +1839,8 @@ def render_cards(cards):
             """, unsafe_allow_html=True)
 
 
-def render_hunger_body(d, seg, T, lang):
-    render_segment_change(d, seg, T, CHANGE[lang])
-    render_target_status(d, TARGETMSG[lang])
-
-    st.markdown(f'<div class="section-title">{html.escape(T["overview"])}</div>', unsafe_allow_html=True)
-    render_cards([
+def hunger_cards(d, seg, T):
+    return [
         (T["orders"], fmt_int(d["orders"]), None),
         (T["in_time"], fmt_int(d["orders_in_time"]), None),
         (T["late"], fmt_int(d["late_orders"]), None),
@@ -1240,16 +1850,13 @@ def render_hunger_body(d, seg, T, lang):
         (T["fail"], fmt_pct(d["fail_rate"]), None),
         (T["final"], fmt_pct(d["final_score"]), None),
         (T["segment"], seg, segment_color(seg)),
-    ])
-    render_tips(T, TIPS[lang])
-    st.markdown(f'<div class="footer-note">{html.escape(T["footer"])}</div>', unsafe_allow_html=True)
+    ]
 
 
-def render_keeta_body(d, T, K):
-    st.markdown(f'<div class="section-title">{html.escape(T["overview"])}</div>', unsafe_allow_html=True)
+def keeta_cards(d, K):
     valid_day = fmt_text(d.get("valid_day"))
     level = fmt_text(d.get("level"))
-    render_cards([
+    return [
         (K["accepted"], fmt_int(d.get("accepted")), None),
         (K["delivered"], fmt_int(d.get("delivered")), None),
         (K["cancel"], fmt_int(d.get("cancel")), None),
@@ -1259,9 +1866,28 @@ def render_keeta_body(d, T, K):
         (K["late"], fmt_int(d.get("orders_late")), None),
         (K["valid_days"], valid_day, None),
         (K["level"], level, "#14b8a6" if level != "—" else None),
-    ])
+    ]
+
+
+def render_hunger_body(d, seg, T, lang):
+    render_segment_change(d, seg, T, CHANGE[lang])
+    render_target_status(d, TARGETMSG[lang])
+
+    st.markdown(f'<div class="section-title">{html.escape(T["overview"])}</div>', unsafe_allow_html=True)
+    render_cards(hunger_cards(d, seg, T))
+    render_rider_coaching(d, "hunger", lang)
+    render_tips(T, TIPS[lang])
+    st.markdown(f'<div class="footer-note">{html.escape(T["footer"])}</div>', unsafe_allow_html=True)
+
+
+def render_keeta_body(d, T, K, lang):
+    st.markdown(f'<div class="section-title">{html.escape(T["overview"])}</div>', unsafe_allow_html=True)
+    valid_day = fmt_text(d.get("valid_day"))
+    level = fmt_text(d.get("level"))
+    render_cards(keeta_cards(d, K))
     if valid_day == "—" or level == "—":
         st.markdown(f'<div class="tips-note">ℹ️ {html.escape(K["month_end"])}</div>', unsafe_allow_html=True)
+    render_rider_coaching(d, "keeta", lang)
     st.markdown(f'<div class="footer-note">{html.escape(K["footer"])}</div>', unsafe_allow_html=True)
 
 
@@ -1317,7 +1943,7 @@ if page == "Rider Performance":
         search = st.form_submit_button(T["btn"], use_container_width=True, type="primary")
 
     if search:
-        rider_id = re.sub(r"\.0$", "", rider_id)
+        rider_id = normalize_id_text(rider_id)
         if not rider_id:
             st.session_state["last_id"] = None
             st.warning(T["need_id"])
@@ -1365,49 +1991,381 @@ if page == "Rider Performance":
             if project == "hunger":
                 render_hunger_body(d, seg, T, lang)
             else:
-                render_keeta_body(d, T, KTXT[lang])
+                render_keeta_body(d, T, KTXT[lang], lang)
 
-# ------------------------------------------------------------
-# Admin page
-# ------------------------------------------------------------
+
+# ============================================================
+# ⚙️ ADMIN CONTROL CENTER
+# ============================================================
+ADMIN_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap');
+.block-container {max-width: 1280px !important; padding-top: 1rem !important;}
+html, body, [class*="st-"], .adm-hero, .adm-kpi, .adm-sec, .adm-note {font-family: 'Cairo', 'Inter', system-ui, sans-serif;}
+.adm-hero {background: radial-gradient(1200px 300px at 90% -20%, rgba(99,102,241,.45), transparent),
+           linear-gradient(135deg,#0b1020,#111c3a 60%,#1b2a5c); color:#fff; border-radius:24px; padding:26px 30px; margin:8px 0 18px;
+           box-shadow:0 20px 50px rgba(11,16,32,.35); direction:rtl; display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap;}
+.adm-hero-t {font-size:28px; font-weight:800; letter-spacing:-.3px;}
+.adm-hero-s {color:#aab4d4; font-size:14px; margin-top:4px; font-weight:600;}
+.adm-chips {display:flex; gap:10px; flex-wrap:wrap;}
+.adm-chip {background:rgba(255,255,255,.09); border:1px solid rgba(255,255,255,.16); border-radius:14px; padding:8px 14px; text-align:center; min-width:96px;}
+.adm-chip b {display:block; font-size:20px; font-weight:800;} .adm-chip small {color:#aab4d4; font-size:11px; font-weight:700;}
+.adm-kpis {display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:14px; margin:6px 0 20px; direction:rtl;}
+.adm-kpi {background:#fff; border:1px solid #e8ecf6; border-radius:20px; padding:16px 18px; position:relative; overflow:hidden;
+          box-shadow:0 8px 24px rgba(15,23,42,.06); text-align:right;}
+.adm-kpi::before {content:""; position:absolute; inset-inline-start:0; top:0; bottom:0; width:5px; background:var(--c);}
+.adm-kpi-i {font-size:22px;} .adm-kpi-l {color:#64748b; font-weight:700; font-size:13px; margin-top:2px;}
+.adm-kpi-v {font-size:32px; font-weight:800; color:#0f172a; line-height:1.15; margin-top:2px;}
+.adm-kpi-s {color:#94a3b8; font-size:12px; font-weight:600;}
+.adm-sec {font-size:19px; font-weight:800; color:#0f172a; margin:22px 0 10px; direction:rtl; text-align:right;
+          padding-inline-start:12px; border-inline-start:5px solid #6366f1;}
+.adm-note {background:#eef2ff; border:1px solid #c7d2fe; color:#3730a3; border-radius:14px; padding:11px 15px; font-weight:600;
+           font-size:14px; direction:rtl; text-align:right; margin-bottom:12px;}
+.adm-warn {background:#fffbeb; border:1px solid #fde68a; color:#92400e;}
+.adm-note-card {background:#fff; border:1px solid #e8ecf6; border-radius:16px; padding:12px 16px; margin-bottom:8px; direction:rtl; text-align:right;
+                border-inline-start:5px solid var(--c); box-shadow:0 5px 16px rgba(15,23,42,.05);}
+.adm-note-card b {color:#0f172a;} .adm-note-card small {color:#94a3b8; font-weight:600;}
+.adm-pill {display:inline-block; background:#f1f5f9; border-radius:999px; padding:2px 10px; font-size:12px; font-weight:700; color:#334155; margin-inline-end:6px;}
+.stTabs [data-baseweb="tab-list"] {gap:6px; background:#f1f5f9; padding:6px; border-radius:16px; direction:rtl;}
+.stTabs [data-baseweb="tab"] {border-radius:12px; padding:8px 18px; font-weight:700; height:auto;}
+.stTabs [aria-selected="true"] {background:#fff !important; box-shadow:0 3px 10px rgba(15,23,42,.10);}
+.stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] {display:none;}
+[data-testid="stDataFrame"] {border-radius:16px; overflow:hidden; border:1px solid #e8ecf6;}
+</style>
+"""
+
+SEV_LABEL = {"critical": "🔴 حرج", "warn": "🟠 تنبيه", "ok": "🟢 سليم"}
+
+NOTE_TEMPLATES = {
+    "— رسالة فاضية —": ("", ""),
+    "تحذير: الرفض المتكرر": (
+        "⚠️ تحذير الرفض المتكرر",
+        "الرفض المتكرر للطلبات هيعرّض حسابك للإيقاف وهيتخصم عليك مبالغ مالية. "
+        "اقبل بس الطلبات اللي تقدر تنفذها، ولو عندك ظرف بلّغ الدعم قبل ما ترفض."),
+    "تنبيه: وقت التوصيل": (
+        "⏱️ انتبه لوقت التوصيل",
+        "أي تأخير بيأثر على تقييمك. اتحرك فورًا بعد الاستلام، ابعت للعميل رسائل الشات، "
+        "ودايمًا خلّي معاك إثبات (صور + لقطات شاشة) عشان لو جاتلك مخالفة أو الشركة بعتتلك إيميل."),
+    "حثّ: زيادة الطلبات": (
+        "📈 زوّد طلباتك",
+        "عدد طلباتك أقل من المطلوب. افتح التطبيق وقت الذروة (الغداء والعشاء)، "
+        "وقف قريب من المطاعم المزدحمة، واقبل الطلبات بسرعة."),
+    "تذكير: الإثباتات": (
+        "📸 دايمًا خلّي معاك إثبات",
+        "صوّر الطلب، المسافة، الزحمة، والمبنى، واحتفظ بالشات. الإثبات هو اللي بيحميك لو جاتلك مخالفة."),
+}
+
+
+def adm_kpis(items):
+    e = html.escape
+    cards = "".join(
+        '<div class="adm-kpi" style="--c:' + c + '"><div class="adm-kpi-i">' + ic + '</div><div class="adm-kpi-l">'
+        + e(l) + '</div><div class="adm-kpi-v">' + str(v) + '</div><div class="adm-kpi-s">' + e(s) + "</div></div>"
+        for ic, l, v, s, c in items)
+    st.markdown('<div class="adm-kpis">' + cards + "</div>", unsafe_allow_html=True)
+
+
+def adm_sec(text):
+    st.markdown('<div class="adm-sec">' + html.escape(text) + "</div>", unsafe_allow_html=True)
+
+
+def adm_note(text, warn=False):
+    st.markdown('<div class="adm-note' + (" adm-warn" if warn else "") + '">' + html.escape(text) + "</div>",
+                unsafe_allow_html=True)
+
+
+def build_risk_df(df, project, S):
+    """يضيف أعمدة: الحالة / المشاكل / عدد المشاكل / f_<rule> لكل مندوب."""
+    sev_list, issues_list, counts = [], [], []
+    flags = {k: [] for k in ISSUE_KEYS}
+    for rec in df.to_dict("records"):
+        items = evaluate(rec, project, S)
+        keys = {k for k, _, _ in items}
+        sevs = {s for _, s, _ in items}
+        sev = "critical" if "critical" in sevs else ("warn" if "warn" in sevs else "ok")
+        iss = [k for k in ISSUE_KEYS if k in keys]
+        sev_list.append(sev)
+        issues_list.append(" + ".join(RULE_AR[k] for k in iss) if iss else "—")
+        counts.append(len(iss))
+        for k in ISSUE_KEYS:
+            flags[k].append(k in keys)
+    out = df.copy()
+    out["_sev"] = sev_list
+    out["الحالة"] = [SEV_LABEL[s] for s in sev_list]
+    out["المشاكل"] = issues_list
+    out["_n"] = counts
+    out["_rank"] = [SEV_RANK.get(s, 3) for s in sev_list]
+    for k in ISSUE_KEYS:
+        out["f_" + k] = flags[k]
+    return out
+
+
+HUNGER_COLS = {"rider_id": "ID", "rider_name": "الاسم", "segment": "Segment", "orders": "الطلبات",
+               "late_orders": "المتأخرة", "on_time_rate": "أون تايم %", "acceptance_rate": "قبول %",
+               "verification_rate": "تحقق %", "fail_rate": "Fail %", "الحالة": "الحالة", "المشاكل": "المشاكل"}
+KEETA_COLS = {"rider_id": "ID", "rider_name": "الاسم", "delivered": "الموصلة", "rejected": "المرفوضة",
+              "cancel": "الملغية", "cancel_rate": "إلغاء %", "on_time_rate": "أون تايم %",
+              "orders_late": "المتأخرة", "level": "المستوى", "الحالة": "الحالة", "المشاكل": "المشاكل"}
+
+
+def table_view(risk, project):
+    cmap = HUNGER_COLS if project == "hunger" else KEETA_COLS
+    cols = [c for c in cmap if c in risk.columns]
+    return risk[cols].rename(columns=cmap)
+
+
+# ---------------- Dashboard ----------------
+def admin_dashboard(project, df, risk, S):
+    if df.empty:
+        adm_note("لسه مفيش بيانات للمشروع ده. ارفع ملف من تاب 📥 الرفع.", warn=True)
+        return
+    n = len(risk)
+    crit = int((risk["_sev"] == "critical").sum())
+    warn = int((risk["_sev"] == "warn").sum())
+    ok = n - crit - warn
+    ot = risk["on_time_rate"][risk["on_time_rate"] > 0].mean() if "on_time_rate" in risk else 0
+    ot = 0 if pd.isna(ot) else ot
+
+    if project == "hunger":
+        fs = risk["final_score"][risk["final_score"] > 0].mean()
+        adm_kpis([
+            ("👥", "المناديب", f"{n:,}", "في آخر ملف", "#6366f1"),
+            ("📦", "إجمالي الطلبات", f"{int(risk['orders'].sum()):,}", "كل المناديب", "#0ea5e9"),
+            ("⏱️", "متوسط الأون تايم", f"{ot:.1f}%", "المطلوب 98%", "#16a34a" if ot >= 98 else "#f59e0b"),
+            ("⭐", "متوسط الجودة", f"{0 if pd.isna(fs) else fs:.1f}%", "Final Score", "#8b5cf6"),
+            ("🔴", "حالات حرجة", f"{crit:,}", f"{crit / n * 100:.0f}% من المناديب", "#dc2626"),
+            ("🟠", "تحتاج تنبيه", f"{warn:,}", f"{warn / n * 100:.0f}% من المناديب", "#f59e0b"),
+        ])
+        dist_col, dist_name = "segment", "توزيع الـ Segment"
+    else:
+        adm_kpis([
+            ("👥", "المناديب", f"{n:,}", "في آخر ملف", "#6366f1"),
+            ("📦", "المهام الموصلة", f"{int(risk['delivered'].sum()):,}", "كل المناديب", "#0ea5e9"),
+            ("⏱️", "متوسط الأون تايم", f"{ot:.1f}%", "Experience On-time", "#16a34a" if ot >= 95 else "#f59e0b"),
+            ("⛔", "المهام المرفوضة", f"{int(risk['rejected'].sum()):,}", "إجمالي", "#dc2626"),
+            ("🚫", "الملغية", f"{int(risk['cancel'].sum()):,}", "إجمالي", "#f97316"),
+            ("🔴", "حالات حرجة", f"{crit:,}", f"{crit / n * 100:.0f}% من المناديب", "#dc2626"),
+        ])
+        dist_col, dist_name = "level", "توزيع المستويات"
+
+    c1, c2 = st.columns(2)
+    with c1:
+        adm_sec("أكتر المشاكل انتشارًا")
+        counts = {RULE_AR[k]: int(risk["f_" + k].sum()) for k in PROJECT_RULES[project]}
+        st.bar_chart(pd.Series(counts, name="عدد المناديب"))
+    with c2:
+        adm_sec(dist_name)
+        dist = risk[dist_col].replace({"": "—"}).value_counts()
+        st.bar_chart(dist)
+
+    adm_sec("🚨 أخطر 15 مندوب")
+    top = risk.sort_values(["_rank", "_n"], ascending=[True, False]).head(15)
+    top = top[top["_sev"] != "ok"]
+    if top.empty:
+        adm_note("🎉 مفيش مناديب فيهم مشاكل حاليًا.")
+    else:
+        st.dataframe(table_view(top, project), use_container_width=True, hide_index=True)
+    st.caption(f"سليم: {ok:,} | تنبيه: {warn:,} | حرج: {crit:,} — الحدود قابلة للتعديل من تاب 🎯 التعليمات.")
+
+
+# ---------------- Riders ----------------
+def admin_rider_detail(project, d, S):
+    name = (d.get("rider_name") or "").strip() or "—"
+    if project == "hunger":
+        seg = fmt_text(d.get("segment"))
+        render_profile(d, name, "Rider ID", "Segment", seg, segment_color(seg))
+        render_cards(hunger_cards(d, seg, TEXTS["ar"]))
+    else:
+        level = fmt_text(d.get("level"))
+        render_profile(d, name, "Rider ID", "Level", level, "#14b8a6" if level != "—" else "#64748b")
+        render_cards(keeta_cards(d, KTXT["ar"]))
+
+    adm_sec("🧠 التعليمات اللي بتظهر للمندوب ده")
+    lang_pick = st.radio("لغة المعاينة", list(LANGS.keys()), index=1, horizontal=True, key="prev_lang")
+    items = evaluate(d, project, S)
+    render_coaching(items, notes_for(project, d["rider_id"], [k for k, _, _ in items]), LANGS[lang_pick])
+
+    adm_sec("✍️ أضف رسالة يدوية للمندوب ده")
+    ver = st.session_state.get("rd_ver", 0)
+    tpl = st.selectbox("قالب جاهز", list(NOTE_TEMPLATES.keys()), key=f"rd_tpl_{ver}")
+    t0, b0 = NOTE_TEMPLATES[tpl]
+    title = st.text_input("العنوان", value=t0, key=f"rd_t_{ver}_{tpl}")
+    body = st.text_area("نص التعليمات", value=b0, height=110, key=f"rd_b_{ver}_{tpl}")
+    if st.button("📤 إرسال للمندوب", type="primary", key=f"rd_send_{ver}"):
+        if not body.strip():
+            st.error("اكتب نص التعليمات الأول.")
+        else:
+            add_note(project, "rider", str(d["rider_id"]), None, title, body)
+            st.session_state["rd_ver"] = ver + 1
+            st.success("✅ تم. الرسالة هتظهر للمندوب في صفحته.")
+            st.rerun()
+
+    mine = list_notes(project=project, rider_id=d["rider_id"])
+    if mine:
+        adm_sec("رسائل سابقة لنفس المندوب")
+        for nt in mine:
+            note_row(nt)
+
+
+def note_row(nt):
+    e = html.escape
+    scope_txt = {"rider": "مندوب محدد: " + str(nt.get("rider_id")), "all": "كل المناديب",
+                 "rule": "كل من عنده: " + RULE_AR.get(nt.get("rule"), str(nt.get("rule")))}[nt["scope"]]
+    color = "#9333ea" if nt["active"] else "#cbd5e1"
+    st.markdown(
+        '<div class="adm-note-card" style="--c:' + color + '"><span class="adm-pill">'
+        + ("🟢 فعّالة" if nt["active"] else "⚪ موقوفة") + '</span><span class="adm-pill">' + e(scope_txt)
+        + '</span><b>' + e(nt.get("title") or "—") + "</b><div>" + e(nt["body"]).replace("\n", "<br>")
+        + "</div><small>#" + str(nt["id"]) + " · " + e(str(nt.get("created_at") or "")) + "</small></div>",
+        unsafe_allow_html=True)
+    b1, b2, _ = st.columns([1, 1, 6])
+    if b1.button("⏯ إيقاف/تفعيل", key=f"nt_tg_{nt['id']}"):
+        set_note_active(nt["id"], not nt["active"])
+        st.rerun()
+    if b2.button("🗑 حذف", key=f"nt_del_{nt['id']}"):
+        delete_note(nt["id"])
+        st.rerun()
+
+
+def admin_riders(project, df, risk, S):
+    if df.empty:
+        adm_note("لسه مفيش بيانات للمشروع ده.", warn=True)
+        return
+    f1, f2, f3 = st.columns([2, 2, 3])
+    q = f1.text_input("🔎 بحث بالـ ID أو الاسم", key="rd_q").strip().lower()
+    sev_pick = f2.selectbox("الحالة", ["الكل", "🔴 حرج", "🟠 تنبيه", "🟢 سليم"], key="rd_sev")
+    issue_pick = f3.multiselect("فلتر بالمشكلة", [RULE_AR[k] for k in PROJECT_RULES[project]], key="rd_iss")
+
+    shown = risk
+    if q:
+        shown = shown[shown["rider_id"].astype(str).str.lower().str.contains(q, regex=False)
+                      | shown["rider_name"].astype(str).str.lower().str.contains(q, regex=False)]
+    if sev_pick != "الكل":
+        shown = shown[shown["الحالة"] == sev_pick]
+    for k in PROJECT_RULES[project]:
+        if RULE_AR[k] in issue_pick:
+            shown = shown[shown["f_" + k]]
+    shown = shown.sort_values(["_rank", "_n"], ascending=[True, False])
+
+    st.caption(f"النتائج: {len(shown):,} من {len(risk):,}")
+    st.dataframe(table_view(shown, project), use_container_width=True, hide_index=True, height=380)
+    st.download_button("📥 تحميل النتائج CSV", table_view(shown, project).to_csv(index=False).encode("utf-8-sig"),
+                       file_name=f"{project}_riders_filtered.csv", mime="text/csv", key="rd_dl")
+
+    adm_sec("🔎 ملف المندوب")
+    rid = st.text_input("اكتب ID المندوب لعرض ملفه الكامل", key="rd_pick",
+                        value=str(shown["rider_id"].iloc[0]) if len(shown) == 1 else "")
+    rid = normalize_id_text(rid)
+    if rid:
+        d = get_rider(rid, project)
+        if d is None:
+            st.error("مفيش مندوب بالـ ID ده.")
+        else:
+            admin_rider_detail(project, d, S)
+
+
+# ---------------- Coaching ----------------
+def admin_coaching(project, df, risk, S):
+    left, right = st.columns([3, 2])
+
+    with left:
+        adm_sec("✍️ إرسال تعليمات يدوية")
+        ver = st.session_state.get("co_ver", 0)
+        scope_lbl = st.radio("الإرسال إلى", ["مندوب محدد", "كل المناديب", "كل مندوب عنده مشكلة معينة"],
+                             key=f"co_scope_{ver}", horizontal=True)
+        rid, rule = None, None
+        if scope_lbl == "مندوب محدد":
+            rid = normalize_id_text(st.text_input("ID المندوب", key=f"co_rid_{ver}"))
+        elif scope_lbl == "كل مندوب عنده مشكلة معينة":
+            rule_lbl = st.selectbox("المشكلة", [RULE_AR[k] for k in PROJECT_RULES[project]], key=f"co_rule_{ver}")
+            rule = next(k for k, v in RULE_AR.items() if v == rule_lbl)
+            if not df.empty:
+                st.caption(f"هتوصل لـ {int(risk['f_' + rule].sum()):,} مندوب حاليًا (وأي مندوب يدخل المشكلة دي بعد كده).")
+        elif not df.empty:
+            st.caption(f"هتوصل لكل المناديب ({len(df):,}).")
+
+        tpl = st.selectbox("قالب جاهز", list(NOTE_TEMPLATES.keys()), key=f"co_tpl_{ver}")
+        t0, b0 = NOTE_TEMPLATES[tpl]
+        title = st.text_input("العنوان", value=t0, key=f"co_t_{ver}_{tpl}")
+        body = st.text_area("نص التعليمات", value=b0, height=130, key=f"co_b_{ver}_{tpl}")
+        if st.button("📤 نشر التعليمات", type="primary", use_container_width=True, key=f"co_send_{ver}"):
+            if not body.strip():
+                st.error("اكتب نص التعليمات الأول.")
+            elif scope_lbl == "مندوب محدد" and not rid:
+                st.error("اكتب ID المندوب.")
+            else:
+                scope = {"مندوب محدد": "rider", "كل المناديب": "all"}.get(scope_lbl, "rule")
+                add_note(project, scope, rid, rule, title, body)
+                st.session_state["co_ver"] = ver + 1
+                st.success("✅ تم النشر.")
+                st.rerun()
+
+    with right:
+        adm_sec("🧠 قواعد التوجيه التلقائي")
+        adm_note("التعليمات التلقائية بتتولد لكل مندوب من أرقامه (تأخير، رفض، إلغاء، طلبات قليلة...). عدّل الحدود هنا.")
+        new = copy.deepcopy(S)
+        for key, label in SETTING_LABELS[project].items():
+            cur = S[project][key]
+            if isinstance(DEFAULT_SETTINGS[project][key], int):
+                new[project][key] = st.number_input(label, min_value=0, value=int(cur), step=1, key=f"st_{project}_{key}")
+            else:
+                new[project][key] = st.number_input(label, min_value=0.0, value=float(cur), step=0.5, key=f"st_{project}_{key}")
+        active = st.multiselect("القواعد المفعّلة", [RULE_AR[k] for k in PROJECT_RULES[project]],
+                                default=[RULE_AR[k] for k in PROJECT_RULES[project]
+                                         if k not in S["disabled"].get(project, [])],
+                                key=f"st_on_{project}")
+        new["disabled"][project] = [k for k in PROJECT_RULES[project] if RULE_AR[k] not in active]
+        if st.button("💾 حفظ القواعد", use_container_width=True, key=f"st_save_{project}"):
+            save_settings(new)
+            st.success("✅ تم الحفظ. التعليمات اتحدّثت لكل المناديب فورًا.")
+            st.rerun()
+
+    adm_sec("📚 الرسائل اليدوية المنشورة")
+    notes = list_notes(project=project)
+    if not notes:
+        adm_note("مفيش رسائل يدوية لسه.")
+    for nt in notes[:30]:
+        note_row(nt)
+
+
+# ---------------- Upload ----------------
 def admin_upload_hunger():
-    st.info("⚠️ أي رفع جديد لهنجر ستيشن هيمسح بيانات هنجر القديمة (كيتا مش هتتأثر).")
-
+    adm_note("⚠️ أي رفع جديد لهنجر ستيشن هيمسح بيانات هنجر القديمة (كيتا مش هتتأثر).", warn=True)
     uploaded = st.file_uploader("Excel / CSV file", type=["xlsx", "xls", "csv"], key="up_hunger")
     if not uploaded:
         return
 
     try:
-        if uploaded.name.lower().endswith(".csv"):
-            raw = pd.read_csv(uploaded)
-        else:
-            raw = pd.read_excel(uploaded)
+        raw, hdr = read_table(uploaded, FIELDS)
     except Exception as e:
         st.error(f"Could not read the file: {e}")
         return
 
     st.success(f"File loaded — {len(raw):,} rows, {len(raw.columns)} columns.")
+    if hdr > 0:
+        st.info(f"تم اكتشاف صف العناوين تلقائيًا في الصف رقم {hdr + 1}.")
+    with st.expander("الأعمدة اللي اتقرأت من الملف"):
+        st.write(" | ".join(map(str, raw.columns)))
 
     mapping = auto_map(raw.columns, FIELDS)
-    missing = [FIELDS[k][0] for k, v in mapping.items() if v is None]
-
-    if missing:
-        st.error("الملف ناقصه أعمدة: " + "، ".join(missing))
-        st.caption("الأعمدة المطلوبة: " + " | ".join(
-            ["rider_id", "Name", "chat with customer", "acceptance rate",
-             "verification_success_rate", "completed_orders", "completed_orders_in_time",
-             "Orders late", "failed_orders_by_rider", "on_time_delivery_score",
-             "fail_rate_score", "final_delivery_quality_score", "segment"]))
+    mapping = manual_map(raw, mapping, FIELDS, "hunger")
+    if mapping["rider_id"] is None:
+        st.error("مفيش عمود ID. اختاره يدويًا من «مطابقة الأعمدة يدويًا» فوق.")
         return
+    missing = [FIELDS[k][0] for k, v in mapping.items() if v is None]
+    if missing:
+        st.warning("أعمدة مش موجودة (هتظهر 0 / —): " + "، ".join(missing))
 
     clean = build_clean_df(raw, mapping)
+    if clean.empty:
+        st.error("مفيش صفوف صالحة بعد القراءة. اتأكد إن عمود الـ ID صح.")
+        return
 
     seg_counts = clean["segment"].value_counts().to_dict()
     st.caption("Segment في الملف: " + " | ".join(f"{k}: {v}" for k, v in seg_counts.items()))
-    st.dataframe(clean.drop(columns=["uploaded_at"]).head(20),
-                 use_container_width=True, hide_index=True)
+    st.dataframe(clean.drop(columns=["uploaded_at"]).head(20), use_container_width=True, hide_index=True)
 
-    st.markdown("##### 🎯 إعدادات التارجت")
+    adm_sec("🎯 إعدادات التارجت")
     g1, g2 = st.columns(2)
     tgt = g1.number_input("التارجت اليومي (طلب/يوم)", min_value=1, value=17, step=1)
     days = g2.number_input("عدد الأيام اللي الشيت مغطيها (من أول الشهر)", min_value=1,
@@ -1425,7 +2383,7 @@ def admin_upload_hunger():
 
 
 def admin_upload_keeta():
-    st.info("⚠️ أي رفع جديد لكيتا هيمسح بيانات كيتا القديمة (هنجر ستيشن مش هتتأثر).")
+    adm_note("⚠️ أي رفع جديد لكيتا هيمسح بيانات كيتا القديمة (هنجر ستيشن مش هتتأثر).", warn=True)
     st.caption("التيمبلت: id | name | accepted | Delivered Tasks | cancel | Rejected Tasks | "
                "Cancellation Rate from Delivery Issues | Experience_On-time Rate (D) | orders late | valid day | level "
                "— الـ valid day والـ level ممكن يكونوا فاضيين لحد آخر الشهر.")
@@ -1435,20 +2393,21 @@ def admin_upload_keeta():
         return
 
     try:
-        # dtype=str عشان الـ ID الطويل (16 رقم) ميتبوظش
-        if uploaded.name.lower().endswith(".csv"):
-            raw = pd.read_csv(uploaded, dtype=str)
-        else:
-            raw = pd.read_excel(uploaded, dtype=str)
+        raw, hdr = read_table(uploaded, KEETA_FIELDS)
     except Exception as e:
         st.error(f"Could not read the file: {e}")
         return
 
     st.success(f"File loaded — {len(raw):,} rows, {len(raw.columns)} columns.")
+    if hdr > 0:
+        st.info(f"تم اكتشاف صف العناوين تلقائيًا في الصف رقم {hdr + 1}.")
+    with st.expander("الأعمدة اللي اتقرأت من الملف"):
+        st.write(" | ".join(map(str, raw.columns)))
 
     mapping = auto_map(raw.columns, KEETA_FIELDS)
+    mapping = manual_map(raw, mapping, KEETA_FIELDS, "keeta")
     if mapping["rider_id"] is None:
-        st.error("الملف مفيهوش عمود id.")
+        st.error("مفيش عمود ID متعرّف. اختاره يدويًا من «مطابقة الأعمدة يدويًا» فوق (الأعمدة اللي اتقرأت ظاهرة في القايمة).")
         return
 
     missing = [KEETA_FIELDS[k][0] for k, v in mapping.items() if v is None]
@@ -1456,52 +2415,71 @@ def admin_upload_keeta():
         st.warning("أعمدة مش موجودة في الملف (هتظهر 0 / —): " + "، ".join(missing))
 
     clean = build_keeta_df(raw, mapping)
+    if clean.empty:
+        st.error("مفيش صفوف صالحة بعد القراءة. اتأكد إن عمود الـ ID صح.")
+        return
 
     no_valid = int((clean["valid_day"] == "").sum())
     no_level = int((clean["level"] == "").sum())
     st.caption(f"الرايدرز: {len(clean):,} | من غير valid day: {no_valid:,} | من غير level: {no_level:,}")
-    st.dataframe(clean.drop(columns=["uploaded_at"]).head(20),
-                 use_container_width=True, hide_index=True)
+    st.dataframe(clean.drop(columns=["uploaded_at"]).head(20), use_container_width=True, hide_index=True)
 
     if st.button("💾 مسح القديم ورفع الجديد", type="primary", use_container_width=True, key="save_keeta"):
         replace_keeta_data(clean)
         st.success(f"✅ تم. بيانات كيتا القديمة اتمسحت واتحمّل {len(clean):,} رايدر.")
 
 
-if page != "Rider Performance":
-    if not admin_login():
-        st.stop()
+# ---------------- Admin shell ----------------
+def render_admin():
+    st.markdown(ADMIN_CSS, unsafe_allow_html=True)
+    S = load_settings()
+    pend = count_requests("pending")
 
-    st.title("⚙️ Performance Admin")
-    _pend = count_requests("pending")
-    tab_upload, tab_data, tab_req = st.tabs(["📥 Upload", "📊 Current Data",
-                                             "📨 Requests" + (" (" + str(_pend) + ")" if _pend else "")])
+    pname = st.radio("المشروع", ["🟡 Keeta", "🍔 HungerStation"], horizontal=True, key="adm_proj",
+                     label_visibility="collapsed")
+    project = "keeta" if "Keeta" in pname else "hunger"
 
-    with tab_upload:
-        up_proj = st.radio("المشروع", ["Keeta", "HungerStation"], horizontal=True, key="up_proj")
-        if up_proj == "Keeta":
+    df = get_all(project)
+    risk = build_risk_df(df, project, S) if not df.empty else df
+    last = str(df["uploaded_at"].iloc[0]).replace("T", " ") if (not df.empty and "uploaded_at" in df) else "—"
+    n_crit = int((risk["_sev"] == "critical").sum()) if not df.empty else 0
+    n_notes = len([n for n in list_notes(project=project) if n["active"]])
+
+    st.markdown(
+        '<div class="adm-hero"><div><div class="adm-hero-t">Rider Performance · Control Center</div>'
+        '<div class="adm-hero-s">' + html.escape(PROJECTS[project]["name"]) + " · آخر رفع: " + html.escape(last)
+        + '</div></div><div class="adm-chips">'
+        '<div class="adm-chip"><b>' + f"{len(df):,}" + '</b><small>مندوب</small></div>'
+        '<div class="adm-chip"><b>' + str(n_crit) + '</b><small>حالة حرجة</small></div>'
+        '<div class="adm-chip"><b>' + str(n_notes) + '</b><small>رسالة فعّالة</small></div>'
+        '<div class="adm-chip"><b>' + str(pend) + '</b><small>طلب معلّق</small></div>'
+        "</div></div>", unsafe_allow_html=True)
+
+    t_dash, t_riders, t_coach, t_up, t_req = st.tabs([
+        "📈 لوحة التحكم", "🧑‍✈️ المناديب", "🎯 التعليمات", "📥 الرفع",
+        "📨 الطلبات" + (" (" + str(pend) + ")" if pend else "")])
+
+    with t_dash:
+        admin_dashboard(project, df, risk, S)
+    with t_riders:
+        admin_riders(project, df, risk, S)
+    with t_coach:
+        admin_coaching(project, df, risk, S)
+    with t_up:
+        if project == "keeta":
             admin_upload_keeta()
         else:
             admin_upload_hunger()
-
-    with tab_data:
-        dp = st.radio("المشروع", ["Keeta", "HungerStation"], horizontal=True, key="data_proj")
-        dp_key = "keeta" if dp == "Keeta" else "hunger"
-        current = get_all(dp_key)
-        if current.empty:
-            st.info("No data uploaded yet.")
-        else:
-            st.metric("Riders", f"{len(current):,}")
-            st.caption(f"آخر رفع: {current['uploaded_at'].iloc[0]}")
-            st.dataframe(current.drop(columns=["uploaded_at"]),
-                         use_container_width=True, hide_index=True)
+        if not df.empty:
             st.download_button(
-                "📥 Download Current Data",
-                data=current.to_csv(index=False).encode("utf-8-sig"),
-                file_name=f"{dp_key}_performance_current.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
-
-    with tab_req:
+                "📥 تحميل البيانات الحالية CSV",
+                data=df.to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"{project}_performance_current.csv", mime="text/csv", key="dl_current")
+    with t_req:
         admin_requests_ui()
+
+
+if page != "Rider Performance":
+    if not admin_login():
+        st.stop()
+    render_admin()
