@@ -69,7 +69,7 @@ KEETA_FIELDS = {
     "cancel_rate": ("Cancellation Rate from Delivery Issues", False,
                     ["cancellationratefromdeliveryissues", "cancellationrate"]),
     "on_time_rate": ("Experience_On-time Rate (D)", False,
-                     ["experienceontimeratd", "experienceontimerate", "ontimerate", "ontime"]),
+                     ["experienceontimerated", "experienceontimeratd", "experienceontimerate", "ontimerate", "ontime"]),
     "orders_late": ("orders late", False, ["orderslate", "lateorders", "late"]),
     "valid_day":   ("valid day", False, ["validday", "validdays"]),
     "level":       ("level", False, ["level", "segment"]),
@@ -332,11 +332,33 @@ def auto_map(columns, fields=None):
     return mapping
 
 
+def guess_id_column(raw):
+    """لو مفيش عمود اسمه ID: نختار العمود اللي أغلب قيمه أرقام طويلة (6+ خانات)."""
+    best, best_ratio = None, 0.0
+    for c in raw.columns:
+        vals = raw[c].astype(str).map(_fix_id)
+        vals = vals[vals != ""]
+        if len(vals) == 0:
+            continue
+        ratio = vals.str.fullmatch(r"\d{6,}").mean()
+        if ratio > best_ratio:
+            best, best_ratio = c, ratio
+    return best if best_ratio >= 0.8 else None
+
+
 def manual_map(raw, mapping, fields, prefix):
     """لو في أعمدة مش اتعرفت تلقائي، الأدمن يختارها يدويًا."""
     miss = [k for k, v in mapping.items() if v is None]
     if not miss:
         return mapping
+    if mapping.get("rider_id") is None:
+        g = guess_id_column(raw)
+        if g is not None:
+            mapping["rider_id"] = g
+            st.info(f"تم اختيار عمود «{g}» كـ ID تلقائيًا لأن قيمه أرقام طويلة. لو غلط غيّره من تحت.")
+            miss = [k for k, v in mapping.items() if v is None]
+            if not miss:
+                return mapping
     none_label = "— لا يوجد —"
     opts = [none_label] + list(raw.columns)
     with st.expander("🧩 مطابقة الأعمدة يدويًا (للأعمدة اللي ما اتعرفتش)", expanded=mapping["rider_id"] is None):
